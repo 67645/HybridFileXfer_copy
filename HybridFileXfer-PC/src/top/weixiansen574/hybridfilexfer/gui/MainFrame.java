@@ -6,7 +6,6 @@ import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.bean.TrafficInfo;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
 import top.weixiansen574.hybridfilexfer.core.callback.ConnectServerCallback;
-import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcException;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.jdkcore.JdkHFXClient;
@@ -53,24 +52,25 @@ import java.util.concurrent.Executors;
 /** Swing 主界面：连接面板 + 手机文件浏览 + 传输队列 + 日志。 */
 public class MainFrame extends JFrame {
     private final JTextArea logArea = new JTextArea();
-    private final JLabel statusLabel = new JLabel("未连接");
+    private final JLabel statusLabel = new JLabel(GuiStrings.get("statusNotConnected"));
     private final JProgressBar progressBar = new JProgressBar(0, 100);
-    private final JButton disconnectButton = new JButton("断开");
+    private final JButton disconnectButton = new JButton(GuiStrings.get("disconnect"));
     private final JComboBox<AdbUtil.AdbDevice> deviceBox = new JComboBox<>();
-    private final JButton refreshButton = new JButton("刷新设备");
-    private final JButton connectAdbButton = new JButton("连接（ADB）");
+    private final JButton refreshButton = new JButton(GuiStrings.get("refreshDevices"));
+    private final JButton connectAdbButton = new JButton(GuiStrings.get("connectAdb"));
     private final JTextField hostField = new JTextField("192.168.1.100", 14);
-    private final JButton connectLanButton = new JButton("连接（局域网）");
+    private final JButton connectLanButton = new JButton(GuiStrings.get("connectLan"));
     private final JTextField receiveDirField = new JTextField(24);
     private final JSpinner portSpinner = new JSpinner(new SpinnerNumberModel(GuiConfig.getPort(), 1, 65535, 1));
 
     private final JTextField remotePathField = new JTextField();
-    private final JButton upButton = new JButton("上级目录");
-    private final JButton refreshFilesButton = new JButton("刷新");
-    private final JButton pullButton = new JButton("拉取到电脑");
-    private final JButton pushButton = new JButton("推送文件…");
+    private final JButton upButton = new JButton(GuiStrings.get("up"));
+    private final JButton refreshFilesButton = new JButton(GuiStrings.get("refresh"));
+    private final JButton pullButton = new JButton(GuiStrings.get("pull"));
+    private final JButton pushButton = new JButton(GuiStrings.get("push"));
     private final DefaultTableModel fileModel = new DefaultTableModel(
-            new Object[]{"名称", "类型", "大小", "修改时间"}, 0) {
+            new Object[]{GuiStrings.get("colName"), GuiStrings.get("colType"),
+                    GuiStrings.get("colSize"), GuiStrings.get("colModified")}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
             return false;
@@ -80,7 +80,8 @@ public class MainFrame extends JFrame {
     private final List<RemoteFile> currentFiles = new ArrayList<>();
 
     private final DefaultTableModel queueModel = new DefaultTableModel(
-            new Object[]{"操作", "路径", "状态"}, 0) {
+            new Object[]{GuiStrings.get("colOperation"), GuiStrings.get("colPath"),
+                    GuiStrings.get("colStatus")}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
             return false;
@@ -88,7 +89,7 @@ public class MainFrame extends JFrame {
     };
     private final JTable queueTable = new JTable(queueModel);
     private final DefaultTableModel speedModel = new DefaultTableModel(
-            new Object[]{"通道", "速度"}, 0) {
+            new Object[]{GuiStrings.get("colChannel"), GuiStrings.get("colSpeed")}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
             return false;
@@ -104,7 +105,7 @@ public class MainFrame extends JFrame {
     private String currentRemotePath = "/";
 
     public MainFrame() {
-        super("多轨快传 - HybridFileXfer");
+        super(GuiStrings.get("title"));
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setMinimumSize(new Dimension(980, 680));
         setLayout(new BorderLayout(8, 8));
@@ -116,9 +117,10 @@ public class MainFrame extends JFrame {
 
         disconnectButton.setEnabled(false);
         progressBar.setStringPainted(true);
-        progressBar.setString("空闲");
+        progressBar.setString(GuiStrings.get("idle"));
         setBrowsingEnabled(false);
-        log("端口：" + GuiConfig.getPort() + "，接收目录：" + GuiConfig.getReceiveDir());
+        log(GuiStrings.get("port") + " " + GuiConfig.getPort()
+                + ", " + GuiStrings.get("receiveDir") + " " + GuiConfig.getReceiveDir());
 
         refreshButton.addActionListener(e -> refreshDevices());
         connectAdbButton.addActionListener(e -> connectViaAdb());
@@ -162,16 +164,16 @@ public class MainFrame extends JFrame {
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
 
         JPanel portRow = new JPanel(new GridBagLayout());
-        portRow.setBorder(BorderFactory.createTitledBorder("连接"));
+        portRow.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("connectGroup")));
         GridBagConstraints c = new GridBagConstraints();
         c.insets = new Insets(4, 4, 4, 4);
         c.anchor = GridBagConstraints.WEST;
         c.gridx = 0;
-        portRow.add(new JLabel("端口："), c);
+        portRow.add(new JLabel(GuiStrings.get("port")), c);
         c.gridx = 1;
         portRow.add(portSpinner, c);
         c.gridx = 2;
-        portRow.add(new JLabel("接收目录："), c);
+        portRow.add(new JLabel(GuiStrings.get("receiveDir")), c);
         c.gridx = 3;
         c.weightx = 1;
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -181,7 +183,7 @@ public class MainFrame extends JFrame {
         c.gridx = 4;
         c.weightx = 0;
         c.fill = GridBagConstraints.NONE;
-        JButton browseButton = new JButton("浏览…");
+        JButton browseButton = new JButton(GuiStrings.get("browse"));
         browseButton.addActionListener(e -> chooseReceiveDir());
         portRow.add(browseButton, c);
         panel.add(portRow);
@@ -192,7 +194,7 @@ public class MainFrame extends JFrame {
         ac.insets = new Insets(4, 4, 4, 4);
         ac.anchor = GridBagConstraints.WEST;
         ac.gridx = 0;
-        adbPanel.add(new JLabel("设备："), ac);
+        adbPanel.add(new JLabel(GuiStrings.get("device")), ac);
         ac.gridx = 1;
         ac.weightx = 1;
         ac.fill = GridBagConstraints.HORIZONTAL;
@@ -203,14 +205,14 @@ public class MainFrame extends JFrame {
         adbPanel.add(refreshButton, ac);
         ac.gridx = 3;
         adbPanel.add(connectAdbButton, ac);
-        tabs.addTab("ADB", adbPanel);
+        tabs.addTab(GuiStrings.get("tabAdb"), adbPanel);
 
         JPanel lanPanel = new JPanel(new GridBagLayout());
         GridBagConstraints lc = new GridBagConstraints();
         lc.insets = new Insets(4, 4, 4, 4);
         lc.anchor = GridBagConstraints.WEST;
         lc.gridx = 0;
-        lanPanel.add(new JLabel("手机 IP："), lc);
+        lanPanel.add(new JLabel(GuiStrings.get("phoneIp")), lc);
         lc.gridx = 1;
         lc.weightx = 1;
         lc.fill = GridBagConstraints.HORIZONTAL;
@@ -219,7 +221,7 @@ public class MainFrame extends JFrame {
         lc.weightx = 0;
         lc.fill = GridBagConstraints.NONE;
         lanPanel.add(connectLanButton, lc);
-        tabs.addTab("局域网", lanPanel);
+        tabs.addTab(GuiStrings.get("tabLan"), lanPanel);
         panel.add(tabs);
         return panel;
     }
@@ -228,11 +230,11 @@ public class MainFrame extends JFrame {
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         JScrollPane logScroll = new JScrollPane(logArea);
-        logScroll.setBorder(BorderFactory.createTitledBorder("日志"));
+        logScroll.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("logTitle")));
 
         JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("手机文件", buildFilePanel());
-        tabs.addTab("传输", buildTransferPanel());
+        tabs.addTab(GuiStrings.get("tabFiles"), buildFilePanel());
+        tabs.addTab(GuiStrings.get("tabTransfer"), buildTransferPanel());
 
         JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tabs, logScroll);
         splitPane.setResizeWeight(0.62);
@@ -268,7 +270,7 @@ public class MainFrame extends JFrame {
         panel.add(new JScrollPane(queueTable), BorderLayout.CENTER);
         JScrollPane speedScroll = new JScrollPane(speedTable);
         speedScroll.setPreferredSize(new Dimension(240, 120));
-        speedScroll.setBorder(BorderFactory.createTitledBorder("通道速度"));
+        speedScroll.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("channelSpeed")));
         panel.add(speedScroll, BorderLayout.SOUTH);
         return panel;
     }
@@ -294,17 +296,19 @@ public class MainFrame extends JFrame {
     private void applyReceiveDir() {
         String dir = receiveDirField.getText().trim();
         if (dir.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "接收目录不能为空", "提示", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirEmpty"),
+                    GuiStrings.get("tabTransfer"), JOptionPane.WARNING_MESSAGE);
             receiveDirField.setText(GuiConfig.getReceiveDir());
             return;
         }
         File file = new File(dir);
         if (!file.exists() && !file.mkdirs()) {
-            JOptionPane.showMessageDialog(this, "无法创建接收目录：" + dir, "提示", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirCreateFailed", dir),
+                    GuiStrings.get("tabTransfer"), JOptionPane.ERROR_MESSAGE);
             return;
         }
         GuiConfig.setReceiveDir(dir);
-        log("接收目录已设置为：" + dir);
+        log(GuiStrings.get("receiveDirSet", dir));
     }
 
     private void refreshDevices() {
@@ -313,9 +317,9 @@ public class MainFrame extends JFrame {
             String adb = AdbUtil.findAdb();
             if (adb == null) {
                 uiLater(() -> {
-                    log("未找到 adb。请安装 platform-tools，或把 adb 放到程序目录，", true);
-                    log("也可以设置环境变量 PATH 后重启程序。", true);
-                    setStatus("未找到 adb");
+                    log(GuiStrings.get("adbMissing1"), true);
+                    log(GuiStrings.get("adbMissing2"), true);
+                    setStatus(GuiStrings.get("statusNoAdb"));
                     refreshButton.setEnabled(true);
                 });
                 return;
@@ -328,15 +332,15 @@ public class MainFrame extends JFrame {
                         deviceBox.addItem(device);
                     }
                     if (devices.isEmpty()) {
-                        log("未检测到设备（adb：" + adb + "）。请连接数据线并打开 USB 调试。", true);
+                        log(GuiStrings.get("noDevice", adb), true);
                     } else {
-                        log("检测到 " + devices.size() + " 台设备（adb：" + adb + "）");
+                        log(GuiStrings.get("devicesFound", devices.size(), adb));
                     }
                     refreshButton.setEnabled(true);
                 });
             } catch (Exception ex) {
                 uiLater(() -> {
-                    log("执行 adb devices 失败：" + ex, true);
+                    log(GuiStrings.get("adbDevicesFailed", ex), true);
                     refreshButton.setEnabled(true);
                 });
             }
@@ -346,13 +350,14 @@ public class MainFrame extends JFrame {
     private void connectViaAdb() {
         AdbUtil.AdbDevice device = (AdbUtil.AdbDevice) deviceBox.getSelectedItem();
         if (device == null) {
-            JOptionPane.showMessageDialog(this, "请先刷新并选择设备", "提示", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("selectDevice"),
+                    GuiStrings.get("tabAdb"), JOptionPane.WARNING_MESSAGE);
             return;
         }
         if (!"device".equals(device.state)) {
             JOptionPane.showMessageDialog(this,
-                    "设备当前状态：" + device.stateText() + "\n请先在手机上允许 USB 调试后重试。",
-                    "设备不可用", JOptionPane.WARNING_MESSAGE);
+                    GuiStrings.get("deviceNotReady", device.stateText()) + "\n" + GuiStrings.get("deviceNotReadyHint"),
+                    GuiStrings.get("tabAdb"), JOptionPane.WARNING_MESSAGE);
             return;
         }
         startConnect("127.0.0.1", device.serial);
@@ -361,7 +366,8 @@ public class MainFrame extends JFrame {
     private void connectViaLan() {
         String host = hostField.getText().trim();
         if (host.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "请输入手机 IP", "提示", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("phoneIpEmpty"),
+                    GuiStrings.get("tabLan"), JOptionPane.WARNING_MESSAGE);
             return;
         }
         startConnect(host, null);
@@ -376,26 +382,26 @@ public class MainFrame extends JFrame {
         GuiConfig.setPort(port);
         String receiveDir = receiveDirField.getText().trim();
         setConnectingState(true);
-        setStatus("连接中…");
+        setStatus(GuiStrings.get("statusConnecting"));
         new Thread(() -> {
             try {
                 if (adbSerial != null) {
                     String adb = AdbUtil.findAdb();
                     if (adb == null) {
-                        uiLog("未找到 adb，无法执行端口转发", true);
+                        uiLog(GuiStrings.get("forwardNoAdb"), true);
                         return;
                     }
-                    uiLog("执行端口转发：tcp:" + port + " -> tcp:" + port);
+                    uiLog(GuiStrings.get("forwarding", port, port));
                     String error = AdbUtil.forward(adb, adbSerial, port);
                     if (error != null) {
-                        uiLog("端口转发失败：" + error, true);
+                        uiLog(GuiStrings.get("forwardFailed", error), true);
                         return;
                     }
                 }
                 JdkHFXClient newClient = new JdkHFXClient(host, port, receiveDir);
                 ConnectServerCallback callback = new GuiConnectCallback();
                 if (!newClient.connectAuto(callback)) {
-                    uiLog("连接失败", true);
+                    uiLog(GuiStrings.get("connectFailed"), true);
                     return;
                 }
                 client = newClient;
@@ -406,7 +412,7 @@ public class MainFrame extends JFrame {
                         remoteFileSystem = Integer.parseInt(info[0]);
                         remoteHome = info[1];
                     } catch (Exception e) {
-                        uiLog("查询手机主目录失败：" + e.getMessage(), true);
+                        uiLog(GuiStrings.get("queryHomeFailed", e.getMessage()), true);
                     }
                 }
                 final String initialPath = remoteHome;
@@ -414,9 +420,9 @@ public class MainFrame extends JFrame {
                     setConnectingState(false);
                     disconnectButton.setEnabled(true);
                     setBrowsingEnabled(newClient.getProtocolVersion() == RpcProtocol.VERSION_RPC);
-                    setStatus("已连接（协议 " + newClient.getProtocolVersion() + "）");
+                    setStatus(GuiStrings.get("statusConnected", newClient.getProtocolVersion()));
                     if (newClient.getProtocolVersion() != RpcProtocol.VERSION_RPC) {
-                        log("当前为 300 兼容模式，手机文件浏览与主动推拉需要 301 协议", true);
+                        log(GuiStrings.get("protocol300Hint"), true);
                     } else if (initialPath != null) {
                         navigateTo(initialPath);
                     }
@@ -424,7 +430,7 @@ public class MainFrame extends JFrame {
                 // start() 会一直阻塞到会话结束，被动传输也在其中处理
                 newClient.start(new GuiTransferCallback());
             } catch (Exception e) {
-                uiLog("连接异常：" + e, true);
+                uiLog(GuiStrings.get("connectError", e), true);
             } finally {
                 client = null;
                 uiLater(() -> {
@@ -435,8 +441,8 @@ public class MainFrame extends JFrame {
                     speedModel.setRowCount(0);
                     currentFiles.clear();
                     progressBar.setValue(0);
-                    progressBar.setString("空闲");
-                    setStatus("未连接");
+                    progressBar.setString(GuiStrings.get("idle"));
+                    setStatus(GuiStrings.get("statusNotConnected"));
                 });
             }
         }, "HFX-GuiSession").start();
@@ -445,12 +451,12 @@ public class MainFrame extends JFrame {
     private void disconnect() {
         JdkHFXClient current = client;
         if (current != null) {
-            log("正在断开连接…");
+            log(GuiStrings.get("disconnecting"));
             new Thread(current::disconnect, "HFX-GuiDisconnect").start();
         }
         setConnectingState(false);
         disconnectButton.setEnabled(false);
-        setStatus("未连接");
+        setStatus(GuiStrings.get("statusNotConnected"));
     }
 
     private void applyReceiveDirQuietly() {
@@ -509,7 +515,7 @@ public class MainFrame extends JFrame {
                     fileModel.setRowCount(0);
                     currentFiles.clear();
                     if (files == null) {
-                        log("目录不可读：" + path, true);
+                        log(GuiStrings.get("browseFailed", path, "null"), true);
                     } else {
                         currentFiles.addAll(files);
                         SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
@@ -518,7 +524,7 @@ public class MainFrame extends JFrame {
                                     ? format.format(new Date(file.lastModified())) : "";
                             fileModel.addRow(new Object[]{
                                     file.getName(),
-                                    file.isDirectory() ? "目录" : "文件",
+                                    file.isDirectory() ? GuiStrings.get("dir") : GuiStrings.get("file"),
                                     file.isDirectory() ? "" : Utils.formatFileSize(file.getSize()),
                                     modified
                             });
@@ -528,15 +534,15 @@ public class MainFrame extends JFrame {
                 });
             } catch (RpcException e) {
                 uiLater(() -> {
-                    log("读取目录失败（status=" + e.status + "）：" + e.getMessage(), true);
+                    log(GuiStrings.get("browseFailed", path, "status=" + e.status + " " + e.getMessage()), true);
                     if (e.status == RpcProtocol.ERR_BUSY) {
-                        log("手机端正在传输，稍后再试", true);
+                        log(GuiStrings.get("busyRetry"), true);
                     }
                     setBrowsingEnabled(!transferActive && client != null);
                 });
             } catch (Exception e) {
                 uiLater(() -> {
-                    log("读取目录失败：" + e, true);
+                    log(GuiStrings.get("browseFailed", path, e), true);
                     setBrowsingEnabled(!transferActive && client != null);
                 });
             }
@@ -550,7 +556,8 @@ public class MainFrame extends JFrame {
     private void pullSelected() {
         int[] rows = fileTable.getSelectedRows();
         if (rows.length == 0) {
-            JOptionPane.showMessageDialog(this, "请先选择要拉取的文件或目录", "提示", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("selectToPull"),
+                    GuiStrings.get("tabFiles"), JOptionPane.WARNING_MESSAGE);
             return;
         }
         List<RemoteFile> files = new ArrayList<>();
@@ -563,14 +570,15 @@ public class MainFrame extends JFrame {
         String receiveDir = receiveDirField.getText().trim();
         File localDir = new File(receiveDir);
         if (!localDir.exists() && !localDir.mkdirs()) {
-            JOptionPane.showMessageDialog(this, "接收目录不可用：" + receiveDir, "提示", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirUnavailable", receiveDir),
+                    GuiStrings.get("tabFiles"), JOptionPane.ERROR_MESSAGE);
             return;
         }
         String sourceDirPath = currentRemotePath;
         int remoteFs = remoteFileSystem;
         Directory local = new Directory(localDir.getAbsolutePath(), Directory.getCurrentFileSystem());
         Directory remote = new Directory(sourceDirPath, remoteFs);
-        enqueue("拉取 " + files.size() + " 项", files.get(0).getPath(), () -> {
+        enqueue(GuiStrings.get("pullTitle", files.size()), files.get(0).getPath(), () -> {
             client.pullFiles(files, local, remote, new GuiTransferCallback());
             return true;
         });
@@ -593,7 +601,7 @@ public class MainFrame extends JFrame {
         for (File file : selected) {
             files.add(file);
         }
-        enqueue("推送 " + files.size() + " 项", files.get(0).getAbsolutePath(), () -> {
+        enqueue(GuiStrings.get("pushTitle", files.size()), files.get(0).getAbsolutePath(), () -> {
             for (File file : files) {
                 List<RemoteFile> remoteFiles = new ArrayList<>();
                 remoteFiles.add(new RemoteFile(file));
@@ -613,7 +621,7 @@ public class MainFrame extends JFrame {
         if (client == null) {
             return;
         }
-        queueModel.addRow(new Object[]{operation, path, "排队中"});
+        queueModel.addRow(new Object[]{operation, path, GuiStrings.get("queueWaiting")});
         int row = queueModel.getRowCount() - 1;
         if (transferExecutor == null) {
             transferExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -625,7 +633,7 @@ public class MainFrame extends JFrame {
         transferExecutor.execute(() -> {
             transferActive = true;
             uiLater(() -> {
-                queueModel.setValueAt("进行中", row, 2);
+                queueModel.setValueAt(GuiStrings.get("queueRunning"), row, 2);
                 setBrowsingEnabled(false);
             });
             boolean ok;
@@ -633,11 +641,11 @@ public class MainFrame extends JFrame {
                 ok = job.run();
             } catch (Exception e) {
                 ok = false;
-                uiLog("传输失败：" + e, true);
+                uiLog(GuiStrings.get("transferFailed", e), true);
             }
             boolean finalOk = ok;
             uiLater(() -> {
-                queueModel.setValueAt(finalOk ? "完成" : "失败", row, 2);
+                queueModel.setValueAt(GuiStrings.get(finalOk ? "queueDone" : "queueFailed"), row, 2);
                 transferActive = false;
                 if (client != null) {
                     setBrowsingEnabled(true);
@@ -661,7 +669,7 @@ public class MainFrame extends JFrame {
 
     private void log(String message, boolean error) {
         String time = new SimpleDateFormat("HH:mm:ss").format(new Date());
-        logArea.append("[" + time + "] " + (error ? "错误：" : "") + message + "\n");
+        logArea.append("[" + time + "] " + (error ? "! " : "") + message + "\n");
         logArea.setCaretPosition(logArea.getDocument().getLength());
     }
 
@@ -676,61 +684,61 @@ public class MainFrame extends JFrame {
     private class GuiConnectCallback implements ConnectServerCallback {
         @Override
         public void onConnectingControlChannel(String address, int port) {
-            uiLog("正在连接控制通道：" + address + ":" + port);
+            uiLog(GuiStrings.get("connectingControl", address, port));
         }
 
         @Override
         public void onVersionMismatch(int localVersion, int remoteVersion) {
-            uiLog("对端协议版本不匹配（本端 " + localVersion + "，对端 " + remoteVersion + "），已切换到兼容模式");
+            uiLog(GuiStrings.get("versionMismatch", localVersion, remoteVersion));
         }
 
         @Override
         public void onConnectControlFailed() {
-            uiLog("控制通道连接失败，请确认手机端已启动服务、端口一致且网络可达", true);
+            uiLog(GuiStrings.get("controlFailed"), true);
         }
 
         @Override
         public void onConnectingTransferChannel(String name, InetAddress inetAddress, InetAddress bindAddress) {
-            uiLog("正在连接传输通道：" + name + " " + inetAddress.getHostAddress());
+            uiLog(GuiStrings.get("connectingTransfer", name, inetAddress.getHostAddress()));
         }
 
         @Override
         public void onConnectTransferChannelFailed(String name, InetAddress inetAddress, Exception e) {
-            uiLog("传输通道连接失败：" + name + " " + inetAddress.getHostAddress() + "（" + e.getMessage() + "），已跳过该网卡", true);
+            uiLog(GuiStrings.get("transferChannelFailed", name, inetAddress.getHostAddress(), e.getMessage()), true);
         }
 
         @Override
         public void onOOM(int createdBuffers, int requiredBuffers, long maxMemoryMB, String osArch) {
-            uiLog("本机内存不足，仅创建 " + createdBuffers + "/" + requiredBuffers + " 个缓冲区块", true);
+            uiLog(GuiStrings.get("localOom", createdBuffers, requiredBuffers), true);
         }
 
         @Override
         public void onRemoteOOM() {
-            uiLog("手机端内存不足，请调小缓冲区块数", true);
+            uiLog(GuiStrings.get("remoteOom"), true);
         }
 
         @Override
         public void onConnectSuccess(List<String> channelNames) {
-            uiLog("连接成功，通道：" + channelNames);
+            uiLog(GuiStrings.get("connectSuccess", channelNames));
         }
     }
 
     private class GuiTransferCallback implements ClientCallBack {
         @Override
         public void onReceiving() {
-            uiLog("手机端正在推送文件到电脑…");
-            uiLater(() -> progressBar.setString("接收中"));
+            uiLog(GuiStrings.get("peerPushing"));
+            uiLater(() -> progressBar.setString(GuiStrings.get("statusReceiving")));
         }
 
         @Override
         public void onSending() {
-            uiLog("手机端正在从电脑拉取文件…");
-            uiLater(() -> progressBar.setString("发送中"));
+            uiLog(GuiStrings.get("peerPulling"));
+            uiLater(() -> progressBar.setString(GuiStrings.get("statusSending")));
         }
 
         @Override
         public void onExit() {
-            uiLog("对端已断开连接");
+            uiLog(GuiStrings.get("disconnected"));
         }
 
         @Override
@@ -751,7 +759,7 @@ public class MainFrame extends JFrame {
             }
             final long speed = total;
             uiLater(() -> {
-                setStatus("传输中 " + Utils.formatSpeed(speed));
+                setStatus(GuiStrings.get("statusTransferring", Utils.formatSpeed(speed)));
                 speedModel.setRowCount(0);
                 for (TrafficInfo info : trafficInfoList) {
                     speedModel.addRow(new Object[]{info.iName,
@@ -762,38 +770,38 @@ public class MainFrame extends JFrame {
 
         @Override
         public void onChannelComplete(String iName, long traffic, long time) {
-            uiLog("通道 " + iName + " 完成，用时 " + Utils.formatTime(time));
+            uiLog(GuiStrings.get("channelDone", iName, Utils.formatTime(time)));
         }
 
         @Override
         public void onChannelError(String iName, int errorType, String message) {
-            uiLog("通道 " + iName + " 出错：" + message, true);
+            uiLog(GuiStrings.get("channelError", iName, message), true);
         }
 
         @Override
         public void onReadFileError(String message) {
-            uiLog("读取文件失败：" + message, true);
+            uiLog(GuiStrings.get("readFileError", message), true);
         }
 
         @Override
         public void onWriteFileError(String message) {
-            uiLog("写入文件失败：" + message, true);
+            uiLog(GuiStrings.get("writeFileError", message), true);
         }
 
         @Override
         public void onComplete(boolean isUpload, long traffic, long time) {
-            uiLog((isUpload ? "发送" : "接收") + "完成，传输量 " + Utils.formatFileSize(traffic)
-                    + "，用时 " + Utils.formatTime(time));
+            uiLog(GuiStrings.get(isUpload ? "sendComplete" : "receiveComplete",
+                    Utils.formatFileSize(traffic), Utils.formatTime(time)));
             uiLater(() -> {
                 progressBar.setValue(100);
-                progressBar.setString("完成");
+                progressBar.setString(GuiStrings.get("done"));
             });
         }
 
         @Override
         public void onIncomplete() {
-            uiLog("传输未完成", true);
-            uiLater(() -> progressBar.setString("未完成"));
+            uiLog(GuiStrings.get("notCompleted"), true);
+            uiLater(() -> progressBar.setString(GuiStrings.get("incomplete")));
         }
     }
 
@@ -804,7 +812,7 @@ public class MainFrame extends JFrame {
                 progressBar.setValue(percent);
                 progressBar.setString(percent + "%");
             }
-            setStatus("传输中：" + path);
+            setStatus(GuiStrings.get("statusTransferPath", path));
         });
     }
 

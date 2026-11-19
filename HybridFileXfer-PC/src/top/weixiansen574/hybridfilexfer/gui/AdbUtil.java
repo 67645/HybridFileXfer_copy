@@ -29,11 +29,11 @@ public class AdbUtil {
         public String stateText() {
             switch (state) {
                 case "device":
-                    return "已授权";
+                    return GuiStrings.get("deviceStateAuthorized");
                 case "unauthorized":
-                    return "未授权（请在手机上允许 USB 调试）";
+                    return GuiStrings.get("deviceStateUnauthorized");
                 case "offline":
-                    return "离线";
+                    return GuiStrings.get("deviceStateOffline");
                 default:
                     return state;
             }

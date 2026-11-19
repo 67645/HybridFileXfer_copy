@@ -28,6 +28,11 @@
                 android:icon="@drawable/baseline_more_vert_24"
                 android:title="@string/she_zhi_duan_kou" />
             <item
+                android:id="@+id/allow_pc_access"
+                android:checkable="true"
+                android:checked="false"
+                android:title="@string/yun_xu_dian_nao_zhu_dong_fang_wen" />
+            <item
                 android:id="@+id/client"
                 android:icon="@drawable/baseline_phonelink_ring_24"
                 android:title="@string/lian_jie_shou_ji_fu_wu_duan" />

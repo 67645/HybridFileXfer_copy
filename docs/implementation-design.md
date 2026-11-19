@@ -1,6 +1,6 @@
 # HybridFileXfer GUI 与双向协议实施设计
 
-> 状态：已评审通过，分阶段实施中（阶段 1、2 已完成）
+> 状态：已评审通过，阶段 1-5 已实施完成
 > 适用分支：`feature/gui`
 > 本文档记录讨论结论与代码基线事实，后续实施以此为准，避免偏离。
 
@@ -217,11 +217,11 @@
 
 ## 7. 打包与遗留修复
 
-1. artifact 产物统一命名为 `HybridFileXfer.jar`（含 `HybridFileXferLauncher`、`start.c`、bat、README 的引用）。
-2. 修复 `start-by-adb.bat`、`start-by-network.bat` 的 `-jar` 参数顺序：`-D...` 必须在 `-jar` 之前。
-3. 帮助文案与 README 的 `--device` 改为 `--switch-device`，或代码同时接受 `--device` 作为别名（推荐后者，兼容已写好的脚本）。
-4. `start.exe` 不再直接拼 java 命令，改为调用 Launcher 或统一入口，避免参数分散。
-5. artifact 配置中的 `HybirdFileXfer.jar` 笔误清理；MANIFEST 相对路径改为 `$PROJECT_DIR$/src/META-INF/MANIFEST.MF`，去掉对仓库目录名的隐式依赖。
+1. artifact 产物统一命名为 `HybridFileXfer.jar`（含 `HybridFileXferLauncher`、`start.c`、bat、README 的引用）。**已完成**：仓库内所有引用均为该名称，本地实测构建产物 104KB。
+2. 修复 `start-by-adb.bat`、`start-by-network.bat` 的 `-jar` 参数顺序：`-D...` 必须在 `-jar` 之前。**已完成**。
+3. 帮助文案与 README 的 `--device` 改为 `--switch-device`，或代码同时接受 `--device` 作为别名（推荐后者，兼容已写好的脚本）。**已完成**：代码同时接受两者。
+4. `start.exe` 不再直接拼 java 命令，改为调用 Launcher 或统一入口，避免参数分散。**未做**：需要重新编译 `start.c`/启动器，本环境无 C 工具链；当前 `start.exe` 仍走原有交互流程。
+5. artifact 配置中的 `HybirdFileXfer.jar` 笔误清理；MANIFEST 相对路径改为 `$PROJECT_DIR$/src/META-INF/MANIFEST.MF`，去掉对仓库目录名的隐式依赖。**无对应文件**：本仓库副本不含 `.idea/artifacts`，无法修改。
 
 ---
 
@@ -238,8 +238,8 @@
 
 ## 9. 安全默认值
 
-- 手机端"允许电脑主动访问"默认**关闭**；未开启时所有客户端发起的请求返回 `ERR_PERMISSION`。
-- 首次连接时手机端弹出确认（可记住该电脑），提示可访问范围为共享根目录。
+- 手机端"允许电脑主动访问"默认**关闭**；未开启时所有客户端发起的请求返回 `ERR_PERMISSION`（已实现：菜单可勾选，实时生效）。
+- 首次连接时手机端弹出确认（可记住该电脑）——**本阶段未实现**，当前以全局开关代替；如后续需要按电脑记住授权，再补 IP 白名单。
 - 默认仅允许局域网访问；不自动开放公网。
 - 删除等破坏性操作在 GUI 二次确认，手机端记录最近操作日志。
 
@@ -254,7 +254,7 @@
 | 2（已完成） | 传输任务迁移到帧（job 化）、QUERY_INFO、端口可配置贯通手机端 | 301 模式下推/拉可用 |
 | 3（已完成） | Swing 骨架：主窗口、连接面板（ADB/局域网）、日志、被动传输进度 | 无新依赖，jar < 300KB（实测 92KB） |
 | 4（已完成） | 手机文件浏览、推送/拉取、队列与通道速度 | 完整闭环 |
-| 5（进行中） | 授权开关、i18n、配置持久化、打包与脚本修复、文档 | 发布候选 |
+| 5（已完成） | 授权开关、i18n、配置持久化、打包与脚本修复、文档 | 发布候选 |
 
 ---
 

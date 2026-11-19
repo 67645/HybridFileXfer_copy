@@ -180,7 +180,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     @Override
     public void onServiceConnected(ComponentName name, IBinder service) {
         IIOService iioService = IIOService.Stub.asInterface(service);
-        server = new HFXServer(iioService);
+        server = new HFXServer(iioService, config);
         StartServerCallback callback = new StartServerCallback() {
             @Override
             public void onBindFailed(int port) {
@@ -312,6 +312,15 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     }
 
     @Override
+    public boolean onPrepareOptionsMenu(Menu menu) {
+        MenuItem item = menu.findItem(R.id.allow_pc_access);
+        if (item != null) {
+            item.setChecked(config.isAllowPcAccess());
+        }
+        return super.onPrepareOptionsMenu(menu);
+    }
+
+    @Override
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int itemId = item.getItemId();
         if (itemId == R.id.github) {
@@ -390,6 +399,15 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             dialog.show();
         } else if (itemId == R.id.server_port) {
             showPortDialog();
+        } else if (itemId == R.id.allow_pc_access) {
+            boolean allow = !config.isAllowPcAccess();
+            config.setAllowPcAccess(allow);
+            item.setChecked(allow);
+            Toast.makeText(context,
+                    getString(allow ? R.string.yi_yun_xu_dian_nao_zhu_dong_fang_wen
+                            : R.string.yi_jin_zhi_dian_nao_zhu_dong_fang_wen),
+                    Toast.LENGTH_SHORT).show();
+            return true;
         } else if (itemId == R.id.client) {
             startClient();
         }

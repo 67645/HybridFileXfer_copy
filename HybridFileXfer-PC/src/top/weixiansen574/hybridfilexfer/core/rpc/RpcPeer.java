@@ -248,6 +248,13 @@ public class RpcPeer {
                     status = RpcProtocol.ERR_UNSUPPORTED;
                     break;
             }
+        } catch (RpcPermissionException e) {
+            try {
+                body = RpcCodec.encodeMessage(e.getMessage());
+            } catch (IOException io) {
+                body = EMPTY;
+            }
+            status = RpcProtocol.ERR_PERMISSION;
         } catch (Exception e) {
             try {
                 body = RpcCodec.encodeMessage(String.valueOf(e));

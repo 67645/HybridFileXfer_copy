@@ -28,6 +28,15 @@ public class Config {
         preferences.edit().putInt("mode",mode).apply();
     }
 
+    /** 是否允许电脑主动访问手机文件，安全默认值为关闭。 */
+    public boolean isAllowPcAccess() {
+        return preferences.getBoolean("allow_pc_access", false);
+    }
+
+    public void setAllowPcAccess(boolean allow) {
+        preferences.edit().putBoolean("allow_pc_access", allow).apply();
+    }
+
     public int getServerPort() {
         return preferences.getInt("server_port", 5740);
     }

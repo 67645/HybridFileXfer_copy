@@ -17,6 +17,7 @@ import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.locks.ReentrantLock;
 
 import top.weixiansen574.async.BackstageTask;
+import top.weixiansen574.hybridfilexfer.Config;
 import top.weixiansen574.hybridfilexfer.NativeMemory;
 import top.weixiansen574.hybridfilexfer.aidl.IIOService;
 import top.weixiansen574.hybridfilexfer.core.ControllerIdentifiers;
@@ -35,6 +36,7 @@ import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcCodec;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcFileOps;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcPermissionException;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
 import top.weixiansen574.hybridfilexfer.core.rpc.TransferRequest;
@@ -61,8 +63,11 @@ public class HFXServer extends HFXService implements RpcFileOps {
     private volatile boolean sessionActive;
     private volatile String sessionEndReason;
 
-    public HFXServer(IIOService ioService) {
+    private final Config config;
+
+    public HFXServer(IIOService ioService, Config config) {
         this.ioService = ioService;
+        this.config = config;
     }
 
     public void startServer(int port, List<ServerNetInterface> interfaceList, int localBufferCount, int remoteBufferCount, StartServerCallback callback) throws IOException {
@@ -603,18 +608,27 @@ public class HFXServer extends HFXService implements RpcFileOps {
 
     // ---------------- RpcFileOps：响应电脑端主动请求 ----------------
 
+    private void requirePcPermission() throws RpcPermissionException {
+        if (config != null && !config.isAllowPcAccess()) {
+            throw new RpcPermissionException("手机端未开启“允许电脑主动访问”，请在手机端菜单中打开后重试");
+        }
+    }
+
     @Override
     public List<RemoteFile> rpcListFiles(String path) throws Exception {
+        requirePcPermission();
         return listLocalFiles(path);
     }
 
     @Override
     public boolean rpcDeleteFile(String path) throws Exception {
+        requirePcPermission();
         return ioService.deleteFile(path);
     }
 
     @Override
     public boolean rpcMkdir(String parent, String child) throws Exception {
+        requirePcPermission();
         return ioService.appendAndMkdirs(parent, child);
     }
 
@@ -625,16 +639,19 @@ public class HFXServer extends HFXService implements RpcFileOps {
 
     @Override
     public String rpcReceiveFiles() throws Exception {
+        requirePcPermission();
         return receiveFilesFromPeer(SILENT_CALLBACK);
     }
 
     @Override
     public String rpcSendFiles(TransferRequest request) throws Exception {
+        requirePcPermission();
         return sendFilesToPeer(request.files, request.localDir, request.remoteDir, SILENT_CALLBACK);
     }
 
     @Override
     public byte[] rpcQueryInfo() throws Exception {
+        requirePcPermission();
         return RpcCodec.encodeQueryInfo(Directory.getCurrentFileSystem(),
                 Environment.getExternalStorageDirectory().getAbsolutePath());
     }

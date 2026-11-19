@@ -81,6 +81,9 @@
     <string name="chuang_jian_shi_bai">创建失败</string>
     <string name="duan_kai_lian_jie">断开连接</string>
     <string name="she_zhi_duan_kou">设置端口（默认 5740）</string>
+    <string name="yun_xu_dian_nao_zhu_dong_fang_wen">允许电脑主动访问（默认关闭）</string>
+    <string name="yi_yun_xu_dian_nao_zhu_dong_fang_wen">已允许电脑主动访问</string>
+    <string name="yi_jin_zhi_dian_nao_zhu_dong_fang_wen">已禁止电脑主动访问</string>
     <string name="duan_kou_fan_wei_cuo_wu">端口必须是 1 到 65535 之间的整数</string>
     <string name="duan_kai_lian_jie_deng_dai_zhong_xin_lian_jie">连接已断开（%1$s），等待重新连接</string>
     <string name="ben_she_bei_huan_chong_qu_kuai_shu">本设备缓冲区块数</string>
