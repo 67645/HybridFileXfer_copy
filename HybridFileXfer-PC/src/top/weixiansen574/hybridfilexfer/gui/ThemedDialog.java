@@ -25,6 +25,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.Insets;
 import java.awt.Window;
 import java.awt.event.KeyEvent;
 import java.io.File;
@@ -122,6 +123,46 @@ public class ThemedDialog extends JDialog {
         dialog.pack();
         dialog.setMinimumSize(new Dimension(320, dialog.getHeight()));
         dialog.setLocationRelativeTo(parent);
+        dialog.setVisible(true);
+        return result[0];
+    }
+
+    /** 单行文本输入框；取消返回 null。 */
+    public static String input(Component parent, String title, String message, String initial) {
+        ThemedDialog dialog = new ThemedDialog(ownerOf(parent), title, false);
+        JPanel content = dialog.getContent();
+        content.setBorder(BorderFactory.createEmptyBorder(20, 24, 18, 24));
+        content.setLayout(new BorderLayout(0, 12));
+
+        JLabel text = new JLabel(toHtml(message));
+        text.setForeground(ThemeManager.palette().text);
+        content.add(text, BorderLayout.NORTH);
+
+        JTextField field = new JTextField(initial == null ? "" : initial, 24);
+        field.setMargin(new Insets(4, 8, 4, 8));
+        field.setPreferredSize(new Dimension(340, 30));
+        content.add(field, BorderLayout.CENTER);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttons.setOpaque(false);
+        JButton ok = new JButton(GuiStrings.get("dialogOk"));
+        JButton cancel = new JButton(GuiStrings.get("dialogCancel"));
+        final String[] result = {null};
+        ok.addActionListener(e -> {
+            result[0] = field.getText();
+            dialog.dispose();
+        });
+        field.addActionListener(e -> ok.doClick());
+        cancel.addActionListener(e -> dialog.dispose());
+        buttons.add(ok);
+        buttons.add(cancel);
+        content.add(buttons, BorderLayout.SOUTH);
+
+        dialog.getRootPane().setDefaultButton(ok);
+        dialog.pack();
+        dialog.setMinimumSize(new Dimension(400, dialog.getHeight()));
+        dialog.setLocationRelativeTo(parent);
+        SwingUtilities.invokeLater(field::requestFocusInWindow);
         dialog.setVisible(true);
         return result[0];
     }

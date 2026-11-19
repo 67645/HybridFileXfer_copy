@@ -30,6 +30,7 @@ import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.ListSelectionModel;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
 import javax.swing.border.Border;
@@ -86,6 +87,8 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
     private final JButton refreshFilesButton = new JButton(GuiStrings.get("refresh"));
     private final JButton pullButton = new JButton(GuiStrings.get("pull"));
     private final JButton pushButton = new JButton(GuiStrings.get("push"));
+    private final JButton newFolderButton = new JButton(GuiStrings.get("newFolder"));
+    private final JButton deleteButton = new JButton(GuiStrings.get("delete"));
     private final DefaultTableModel fileModel = new DefaultTableModel(
             new Object[]{GuiStrings.get("colName"), GuiStrings.get("colType"),
                     GuiStrings.get("colSize"), GuiStrings.get("colModified")}, 0) {
@@ -105,6 +108,16 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
     private WindowChrome chrome;
     private boolean maximized;
     private Rectangle normalBounds;
+
+    /** 传输进度聚合：按文件记录已完成字节，界面定时刷新，避免逐块刷 UI。 */
+    private final Object progressLock = new Object();
+    private final java.util.LinkedHashMap<String, Long> progressDone = new java.util.LinkedHashMap<>();
+    private final java.util.LinkedHashMap<String, Long> progressTotal = new java.util.LinkedHashMap<>();
+    private String progressPath;
+    private int progressPercent = -1;
+    private javax.swing.Timer progressTimer;
+    /** 速度表当前展示的通道名，用于原地更新单元格而不清空重建。 */
+    private final List<String> speedChannels = new ArrayList<>();
 
     private final DefaultTableModel queueModel = new DefaultTableModel(
             new Object[]{GuiStrings.get("colOperation"), GuiStrings.get("colPath"),
@@ -167,6 +180,9 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         refreshFilesButton.addActionListener(e -> refreshRemoteFiles());
         pullButton.addActionListener(e -> pullSelected());
         pushButton.addActionListener(e -> pushFiles());
+        newFolderButton.addActionListener(e -> createRemoteFolder());
+        deleteButton.addActionListener(e -> deleteSelected());
+        fileTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         fileTable.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -449,10 +465,14 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         buttons.setOpaque(false);
         sizeButton(upButton, 100);
         sizeButton(refreshFilesButton, 86);
+        sizeButton(newFolderButton, 110);
+        sizeButton(deleteButton, 82);
         sizeButton(pullButton, 110);
         sizeButton(pushButton, 110);
         buttons.add(upButton);
         buttons.add(refreshFilesButton);
+        buttons.add(newFolderButton);
+        buttons.add(deleteButton);
         buttons.add(pullButton);
         buttons.add(pushButton);
         toolbar.add(buttons, BorderLayout.EAST);
@@ -616,6 +636,8 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         panel.setOpaque(false);
         panel.setBorder(BorderFactory.createEmptyBorder(2, 4, 0, 4));
         statusLabel.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+        // 固定宽度，避免状态文字变化时挤动右侧进度条，造成进度条跳动。
+        statusLabel.setPreferredSize(new Dimension(300, 22));
         progressBar.setPreferredSize(new Dimension(0, 22));
         sizeButton(disconnectButton, 96);
         panel.add(statusLabel, BorderLayout.WEST);
@@ -770,12 +792,17 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                 uiLog(GuiStrings.get("connectError", e), true);
             } finally {
                 client = null;
+                resetProgressData();
                 uiLater(() -> {
+                    if (progressTimer != null) {
+                        progressTimer.stop();
+                    }
                     setConnectingState(false);
                     disconnectButton.setEnabled(false);
                     setBrowsingEnabled(false);
                     fileModel.setRowCount(0);
                     speedModel.setRowCount(0);
+                    speedChannels.clear();
                     currentFiles.clear();
                     progressBar.setValue(0);
                     progressBar.setString(GuiStrings.get("idle"));
@@ -823,6 +850,8 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         refreshFilesButton.setEnabled(enabled);
         pullButton.setEnabled(enabled);
         pushButton.setEnabled(enabled);
+        newFolderButton.setEnabled(enabled);
+        deleteButton.setEnabled(enabled);
         fileTable.setEnabled(enabled);
     }
 
@@ -888,6 +917,221 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
 
     private void refreshRemoteFiles() {
         navigateTo(currentRemotePath);
+    }
+
+    /** 在手机当前目录新建文件夹。 */
+    private void createRemoteFolder() {
+        if (client == null) {
+            return;
+        }
+        if (transferActive) {
+            ThemedDialog.warn(this, GuiStrings.get("tabFiles"), GuiStrings.get("opBusy"));
+            return;
+        }
+        String title = GuiStrings.get("newFolderTitle");
+        String name = ThemedDialog.input(this, title, GuiStrings.get("newFolderPrompt"), "");
+        if (name == null) {
+            return;
+        }
+        name = name.trim();
+        String invalid = validateFolderName(name);
+        if (invalid != null) {
+            ThemedDialog.warn(this, title, invalid);
+            return;
+        }
+        if (currentNameExists(name)) {
+            ThemedDialog.warn(this, title, GuiStrings.get("newFolderExists", name));
+            return;
+        }
+        final String folderName = name;
+        setBrowsingEnabled(false);
+        new Thread(() -> {
+            String error = performCreateFolder(folderName);
+            uiLater(() -> {
+                setBrowsingEnabled(!transferActive && client != null);
+                if (error == null) {
+                    String path = joinRemotePath(currentRemotePath, folderName);
+                    String message = GuiStrings.get("newFolderSuccess", path);
+                    log(message);
+                    setStatus(message);
+                    navigateTo(currentRemotePath);
+                } else {
+                    log(error, true);
+                    ThemedDialog.error(this, title, error);
+                    refreshRemoteFiles();
+                }
+            });
+        }, "HFX-Mkdir").start();
+    }
+
+    private String validateFolderName(String name) {
+        if (name.isEmpty()) {
+            return GuiStrings.get("newFolderEmpty");
+        }
+        if (".".equals(name) || "..".equals(name)
+                || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+            return GuiStrings.get("newFolderInvalid");
+        }
+        for (int i = 0; i < name.length(); i++) {
+            if (name.charAt(i) < 0x20) {
+                return GuiStrings.get("newFolderInvalid");
+            }
+        }
+        return null;
+    }
+
+    private boolean currentNameExists(String name) {
+        for (RemoteFile file : currentFiles) {
+            if (file.getName().equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 在后台线程调用：成功返回 null，失败返回可直接展示的错误文本。 */
+    private String performCreateFolder(String name) {
+        JdkHFXClient current = client;
+        if (current == null) {
+            return GuiStrings.get("statusNotConnected");
+        }
+        String path = joinRemotePath(currentRemotePath, name);
+        try {
+            if (current.requestMkdir(currentRemotePath, name)) {
+                return null;
+            }
+            return GuiStrings.get("newFolderFailed", path);
+        } catch (RpcException e) {
+            return GuiStrings.get("newFolderFailed", path) + "\n" + describeRpcError(e);
+        } catch (Exception e) {
+            return GuiStrings.get("newFolderFailed", path) + "\n" + e.getMessage();
+        }
+    }
+
+    /** 删除选中的远端文件/文件夹（可多选），带不可恢复确认。 */
+    private void deleteSelected() {
+        if (client == null) {
+            return;
+        }
+        if (transferActive) {
+            ThemedDialog.warn(this, GuiStrings.get("tabFiles"), GuiStrings.get("opBusy"));
+            return;
+        }
+        int[] rows = fileTable.getSelectedRows();
+        if (rows.length == 0) {
+            ThemedDialog.warn(this, GuiStrings.get("tabFiles"), GuiStrings.get("selectToDelete"));
+            return;
+        }
+        List<RemoteFile> targets = new ArrayList<>();
+        String current = normalizePath(currentRemotePath);
+        StringBuilder names = new StringBuilder();
+        for (int row : rows) {
+            if (row < 0 || row >= currentFiles.size()) {
+                continue;
+            }
+            RemoteFile file = currentFiles.get(row);
+            String path = normalizePath(file.getPath());
+            if ("/".equals(path) || path.equals(current)) {
+                ThemedDialog.warn(this, GuiStrings.get("deleteTitle"), GuiStrings.get("deleteProtected"));
+                return;
+            }
+            targets.add(file);
+            if (names.length() > 0) {
+                names.append('\n');
+            }
+            names.append(file.getPath());
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        if (!ThemedDialog.confirm(this, GuiStrings.get("deleteTitle"),
+                GuiStrings.get("deleteConfirmMessage", names.toString()))) {
+            return;
+        }
+        final List<RemoteFile> list = targets;
+        setBrowsingEnabled(false);
+        new Thread(() -> {
+            List<String> successes = new ArrayList<>();
+            List<String> failures = new ArrayList<>();
+            for (RemoteFile file : list) {
+                String error = performDelete(file);
+                if (error == null) {
+                    successes.add(file.getPath());
+                } else {
+                    failures.add(error);
+                }
+            }
+            uiLater(() -> {
+                setBrowsingEnabled(!transferActive && client != null);
+                for (String path : successes) {
+                    log(GuiStrings.get("deleteSuccess", path));
+                }
+                if (failures.isEmpty()) {
+                    String message = GuiStrings.get("deleteSuccessCount", successes.size());
+                    log(message);
+                    setStatus(message);
+                } else {
+                    for (String failure : failures) {
+                        log(failure, true);
+                    }
+                    ThemedDialog.error(this, GuiStrings.get("deleteTitle"),
+                            String.join("\n", failures));
+                }
+                navigateTo(currentRemotePath);
+            });
+        }, "HFX-Delete").start();
+    }
+
+    /** 在后台线程调用：成功返回 null，失败返回可直接展示的错误文本。 */
+    private String performDelete(RemoteFile file) {
+        JdkHFXClient current = client;
+        if (current == null) {
+            return GuiStrings.get("statusNotConnected");
+        }
+        try {
+            if (current.requestDeleteFile(file.getPath())) {
+                return null;
+            }
+            return GuiStrings.get("deleteFailed", file.getPath());
+        } catch (RpcException e) {
+            return GuiStrings.get("deleteFailed", file.getPath()) + "\n" + describeRpcError(e);
+        } catch (Exception e) {
+            return GuiStrings.get("deleteFailed", file.getPath()) + "\n" + e.getMessage();
+        }
+    }
+
+    private String describeRpcError(RpcException e) {
+        if (e.status == RpcProtocol.ERR_BUSY) {
+            return GuiStrings.get("opBusy");
+        }
+        if (e.status == RpcProtocol.ERR_PERMISSION) {
+            return GuiStrings.get("opPermission");
+        }
+        if (e.status == RpcProtocol.ERR_UNSUPPORTED) {
+            return GuiStrings.get("opUnsupported");
+        }
+        return e.getMessage() == null ? ("status=" + e.status) : e.getMessage();
+    }
+
+    private String joinRemotePath(String parent, String name) {
+        if (parent == null || parent.isEmpty()) {
+            return name;
+        }
+        char last = parent.charAt(parent.length() - 1);
+        if (last == '/' || last == '\\') {
+            return parent + name;
+        }
+        char separator = remoteFileSystem == Directory.FILE_SYSTEM_WINDOWS ? '\\' : '/';
+        return parent + separator + name;
+    }
+
+    /** 去掉末尾分隔符，便于比较根目录/当前目录。 */
+    private static String normalizePath(String path) {
+        String result = path == null ? "" : path;
+        while (result.length() > 1 && (result.endsWith("/") || result.endsWith("\\"))) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
     }
 
     private void pullSelected() {
@@ -969,7 +1213,9 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         }
         transferExecutor.execute(() -> {
             transferActive = true;
+            resetProgressData();
             uiLater(() -> {
+                beginProgressUi();
                 queueModel.setValueAt(GuiStrings.get("queueRunning"), row, 2);
                 setBrowsingEnabled(false);
             });
@@ -983,6 +1229,7 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
             boolean finalOk = ok;
             uiLater(() -> {
                 queueModel.setValueAt(GuiStrings.get(finalOk ? "queueDone" : "queueFailed"), row, 2);
+                stopProgress(finalOk);
                 transferActive = false;
                 if (client != null) {
                     setBrowsingEnabled(true);
@@ -1012,6 +1259,7 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
 
     private void setStatus(String text) {
         statusLabel.setText(text);
+        statusLabel.setToolTipText(text);
     }
 
     private void uiLater(Runnable runnable) {
@@ -1064,13 +1312,15 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         @Override
         public void onReceiving() {
             uiLog(GuiStrings.get("peerPushing"));
-            uiLater(() -> progressBar.setString(GuiStrings.get("statusReceiving")));
+            resetProgressData();
+            uiLater(MainFrame.this::beginProgressUi);
         }
 
         @Override
         public void onSending() {
             uiLog(GuiStrings.get("peerPulling"));
-            uiLater(() -> progressBar.setString(GuiStrings.get("statusSending")));
+            resetProgressData();
+            uiLater(MainFrame.this::beginProgressUi);
         }
 
         @Override
@@ -1080,12 +1330,12 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
 
         @Override
         public void onFileUploading(String iName, String path, long targetSize, long totalSize) {
-            updateProgress(path, targetSize, totalSize);
+            recordProgress(path, targetSize, totalSize);
         }
 
         @Override
         public void onFileDownloading(String iName, String path, long targetSize, long totalSize) {
-            updateProgress(path, targetSize, totalSize);
+            recordProgress(path, targetSize, totalSize);
         }
 
         @Override
@@ -1095,13 +1345,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                 total += info.uploadTraffic + info.downloadTraffic;
             }
             final long speed = total;
+            final List<TrafficInfo> snapshot = new ArrayList<>(trafficInfoList);
             uiLater(() -> {
                 setStatus(GuiStrings.get("statusTransferring", Utils.formatSpeed(speed)));
-                speedModel.setRowCount(0);
-                for (TrafficInfo info : trafficInfoList) {
-                    speedModel.addRow(new Object[]{info.iName,
-                            Utils.formatSpeed(info.uploadTraffic + info.downloadTraffic)});
-                }
+                updateSpeedRows(snapshot);
             });
         }
 
@@ -1129,28 +1376,131 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         public void onComplete(boolean isUpload, long traffic, long time) {
             uiLog(GuiStrings.get(isUpload ? "sendComplete" : "receiveComplete",
                     Utils.formatFileSize(traffic), Utils.formatTime(time)));
-            uiLater(() -> {
-                progressBar.setValue(100);
-                progressBar.setString(GuiStrings.get("done"));
-            });
+            // 主动推送/拉取由队列任务统一收尾；被动传输在这里结束。
+            if (!transferActive) {
+                stopProgress(true);
+            }
         }
 
         @Override
         public void onIncomplete() {
             uiLog(GuiStrings.get("notCompleted"), true);
-            uiLater(() -> progressBar.setString(GuiStrings.get("incomplete")));
+            if (!transferActive) {
+                stopProgress(false);
+            }
         }
     }
 
-    private void updateProgress(String path, long targetSize, long totalSize) {
-        uiLater(() -> {
-            if (totalSize > 0) {
-                int percent = (int) Math.min(100, targetSize * 100 / totalSize);
-                progressBar.setValue(percent);
-                progressBar.setString(percent + "%");
+    /** 清空一次传输任务的进度聚合数据。 */
+    private void resetProgressData() {
+        synchronized (progressLock) {
+            progressDone.clear();
+            progressTotal.clear();
+            progressPath = null;
+        }
+        progressPercent = -1;
+    }
+
+    /** 在 EDT 上启动节流刷新，进度条最多每 100ms 更新一次。 */
+    private void beginProgressUi() {
+        if (progressTimer == null) {
+            progressTimer = new javax.swing.Timer(100, e -> flushProgressUi());
+            progressTimer.setCoalesce(true);
+        }
+        progressPercent = 0;
+        progressBar.setValue(0);
+        progressBar.setString("0%");
+        if (!progressTimer.isRunning()) {
+            progressTimer.start();
+        }
+    }
+
+    /**
+     * 传输线程逐块回调：只记录每个文件的最大完成偏移，不直接碰 Swing。
+     * 多通道完成顺序不固定，取最大值可避免进度条来回跳。
+     */
+    private void recordProgress(String path, long done, long total) {
+        boolean pathChanged;
+        synchronized (progressLock) {
+            Long previous = progressDone.get(path);
+            if (previous == null || done > previous) {
+                progressDone.put(path, done);
             }
-            setStatus(GuiStrings.get("statusTransferPath", path));
-        });
+            progressTotal.put(path, total);
+            pathChanged = !path.equals(progressPath);
+            progressPath = path;
+        }
+        if (pathChanged) {
+            String text = GuiStrings.get("statusTransferPath", path);
+            uiLater(() -> setStatus(text));
+        }
+    }
+
+    private void flushProgressUi() {
+        long done = 0;
+        long total = 0;
+        synchronized (progressLock) {
+            for (Long value : progressDone.values()) {
+                done += value;
+            }
+            for (Long value : progressTotal.values()) {
+                total += value;
+            }
+        }
+        if (total <= 0) {
+            return;
+        }
+        int percent = (int) Math.min(100, done * 100 / total);
+        if (percent == progressPercent) {
+            return;
+        }
+        progressPercent = percent;
+        progressBar.setValue(percent);
+        progressBar.setString(percent + "%");
+    }
+
+    private void stopProgress(boolean completed) {
+        if (progressTimer != null) {
+            progressTimer.stop();
+        }
+        if (completed) {
+            progressPercent = 100;
+            progressBar.setValue(100);
+            progressBar.setString(GuiStrings.get("done"));
+            setStatus(GuiStrings.get("done"));
+        } else {
+            progressBar.setString(GuiStrings.get("incomplete"));
+            setStatus(GuiStrings.get("notCompleted"));
+        }
+    }
+
+    /** 速度表原地更新，避免每秒 setRowCount(0) 造成闪烁。 */
+    private void updateSpeedRows(List<TrafficInfo> list) {
+        boolean sameLayout = list.size() == speedChannels.size();
+        if (sameLayout) {
+            for (int i = 0; i < list.size(); i++) {
+                if (!list.get(i).iName.equals(speedChannels.get(i))) {
+                    sameLayout = false;
+                    break;
+                }
+            }
+        }
+        if (!sameLayout) {
+            speedChannels.clear();
+            speedModel.setRowCount(0);
+            for (TrafficInfo info : list) {
+                speedChannels.add(info.iName);
+                speedModel.addRow(new Object[]{info.iName,
+                        Utils.formatSpeed(info.uploadTraffic + info.downloadTraffic)});
+            }
+            return;
+        }
+        for (int i = 0; i < list.size(); i++) {
+            String text = Utils.formatSpeed(list.get(i).uploadTraffic + list.get(i).downloadTraffic);
+            if (!text.equals(speedModel.getValueAt(i, 1))) {
+                speedModel.setValueAt(text, i, 1);
+            }
+        }
     }
 
     /** 供启动入口使用。 */
