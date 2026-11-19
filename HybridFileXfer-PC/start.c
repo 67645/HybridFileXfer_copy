@@ -4,9 +4,11 @@
 #include <windows.h>
 #include <urlmon.h>
 #include <ctype.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "urlmon.lib")
-
-#pragma execution_character_set("utf-8")//设置字符集为utf-8
+#pragma execution_character_set("utf-8")//设置字符集为utf-8（仅 MSVC）
+#endif
+// MinGW 下请使用：gcc -O2 -o start.exe start.c -lurlmon
 
 // 验证 IP 地址是否合法
 int is_valid_ip(const char *ip_addr) {
@@ -41,10 +43,28 @@ int is_valid_ip(const char *ip_addr) {
     return 1;
 }
 
+// 设备 ID 只允许字母、数字与 - _ . :，避免拼进命令行后破坏参数
+int is_valid_device_id(const char *device_id) {
+    const char *ptr = device_id;
+    if (device_id == NULL || *device_id == '\0') {
+        return 0;
+    }
+    while (*ptr) {
+        unsigned char c = (unsigned char) *ptr;
+        if (!(isalnum(c) || c == '-' || c == '_' || c == '.' || c == ':')) {
+            return 0;
+        }
+        ptr++;
+    }
+    return 1;
+}
+
 int main() {
     // 设置控制台代码页为 UTF-8，确保 C 输出的中文不乱码
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    // 关闭标准输出缓冲，保证重定向/管道下提示语与 Java 输出的顺序正确
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     // JDK 文件的目录和名称
     char jdk_directory[] = "dragonwell-21.0.5.0.5+9-GA";
@@ -107,7 +127,7 @@ int main() {
                 }
             } else {
                 //错误处理
-                printf("下载失败，错误代码: 0x%08X\n请检查网络连接或下载链接是否正确。\n", hr);
+                printf("下载失败，错误代码: 0x%08X\n请检查网络连接或下载链接是否正确。\n", (unsigned int) hr);
                 printf("下载链接: %s\n", jdk_url);
                 printf("目标文件: %s\n", jdk_zip_file);
 				printf("可手动下载文件并将其放置在“dragonwell-21.0.5.0.5+9-GA”目录。\n");
@@ -121,6 +141,15 @@ int main() {
     }
 
     
+    // jar 与 start.exe 必须在同一工作目录，否则下面的 java -jar 会直接失败
+    if (GetFileAttributes("HybridFileXfer.jar") == INVALID_FILE_ATTRIBUTES) {
+        printf("未找到 HybridFileXfer.jar。\n");
+        printf("请确认 start.exe 与 HybridFileXfer.jar 位于同一目录，并在该目录下运行 start.exe。\n");
+        printf("按任意键退出...\n");
+        getchar();
+        return 1;
+    }
+
     printf("============================\n");
     printf("列出已连接设备：\n");
     system("adb devices");
@@ -164,6 +193,14 @@ int main() {
         fgets(device_id, sizeof(device_id), stdin);
         device_id[strcspn(device_id, "\n")] = 0;
 
+        if (strlen(device_id) != 0 && strcmp(device_id, "none") != 0
+            && !is_valid_device_id(device_id)) {
+            printf("设备 ID 包含非法字符，只允许字母、数字与 - _ . :\n");
+            printf("按任意键退出...\n");
+            getchar();
+            return 1;
+        }
+
         if (strlen(device_id) == 0 || strcmp(device_id, "none") == 0) {
             if (use_system_java) {
                 snprintf(command, sizeof(command), 
@@ -189,7 +226,10 @@ int main() {
     int result = system(command);
 
     if (result != 0) {
-        printf("操作失败，请检查连接设置！\n");
+        printf("启动失败（退出码 %d）。请依次检查：\n", result);
+        printf("1. Java 是否可用（命令行执行 java -version 验证）；\n");
+        printf("2. HybridFileXfer.jar 是否与 start.exe 在同一目录；\n");
+        printf("3. 手机端是否已启动服务、adb 设备是否已授权。\n");
         printf("按任意键退出...\n");
         getchar();
         return 1;
