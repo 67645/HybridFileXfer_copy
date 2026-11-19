@@ -15,12 +15,11 @@ import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
-import javax.swing.JFileChooser;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenu;
 import javax.swing.JMenuBar;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JRadioButtonMenuItem;
@@ -35,14 +34,18 @@ import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
 import javax.swing.border.Border;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.GraphicsEnvironment;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Point;
+import java.awt.Rectangle;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
 import java.awt.dnd.DnDConstants;
@@ -65,7 +68,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /** Swing 主界面：连接面板 + 手机文件浏览 + 传输队列 + 日志。 */
-public class MainFrame extends JFrame {
+public class MainFrame extends JFrame implements WindowChrome.Host {
     private final JTextArea logArea = new JTextArea();
     private final JLabel statusLabel = new JLabel(GuiStrings.get("statusNotConnected"));
     private final JProgressBar progressBar = new JProgressBar(0, 100);
@@ -98,6 +101,10 @@ public class MainFrame extends JFrame {
 
     private Border normalFileScrollBorder;
     private String statusBeforeDrag;
+    private boolean dropHighlightActive;
+    private WindowChrome chrome;
+    private boolean maximized;
+    private Rectangle normalBounds;
 
     private final DefaultTableModel queueModel = new DefaultTableModel(
             new Object[]{GuiStrings.get("colOperation"), GuiStrings.get("colPath"),
@@ -127,15 +134,22 @@ public class MainFrame extends JFrame {
     public MainFrame() {
         super(GuiStrings.get("title"));
         ThemeManager.init();
+        setUndecorated(true);
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
-        setMinimumSize(new Dimension(980, 680));
-        setLayout(new BorderLayout(8, 8));
-        ((JPanel) getContentPane()).setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        setMinimumSize(new Dimension(960, 640));
 
-        add(buildTopPanel(), BorderLayout.NORTH);
-        add(buildCenterPanel(), BorderLayout.CENTER);
-        add(buildBottomPanel(), BorderLayout.SOUTH);
-        setJMenuBar(buildMenuBar());
+        chrome = new WindowChrome(GuiStrings.get("title"), this, true, true);
+
+        JPanel content = new JPanel(new BorderLayout(10, 10));
+        content.setOpaque(false);
+        content.setBorder(BorderFactory.createEmptyBorder(10, 12, 10, 12));
+        content.add(buildTopPanel(), BorderLayout.NORTH);
+        content.add(buildCenterPanel(), BorderLayout.CENTER);
+        content.add(buildBottomPanel(), BorderLayout.SOUTH);
+
+        chrome.getBody().add(content, BorderLayout.CENTER);
+        chrome.setMenuBar(buildMenuBar());
+        setContentPane(chrome);
 
         disconnectButton.setEnabled(false);
         progressBar.setStringPainted(true);
@@ -171,32 +185,100 @@ public class MainFrame extends JFrame {
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                disconnect();
-                dispose();
-                System.exit(0);
+                handleClose();
             }
         });
         applyFileTableLayout();
-        ThemeManager.addListener(this::applyFileTableLayout);
-        pack();
+        ThemeManager.addListener(() -> {
+            applyFileTableLayout();
+            chrome.refreshTheme();
+            repaint();
+        });
+        setSize(1120, 760);
         setLocationRelativeTo(null);
         refreshDevices();
     }
 
-    /** 主题切换会重建表格 UI，这里统一恢复列宽与行高。 */
-    private void applyFileTableLayout() {
-        fileTable.setRowHeight(22);
-        if (fileTable.getColumnModel().getColumnCount() >= 4) {
-            fileTable.getColumnModel().getColumn(0).setPreferredWidth(340);
-            fileTable.getColumnModel().getColumn(1).setPreferredWidth(60);
-            fileTable.getColumnModel().getColumn(2).setPreferredWidth(100);
-            fileTable.getColumnModel().getColumn(3).setPreferredWidth(150);
+    @Override
+    public void minimize() {
+        setState(JFrame.ICONIFIED);
+    }
+
+    @Override
+    public void toggleMaximize() {
+        if (!maximized) {
+            normalBounds = getBounds();
+            setBounds(GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds());
+            maximized = true;
+        } else {
+            if (normalBounds != null) {
+                setBounds(normalBounds);
+            }
+            maximized = false;
         }
+        chrome.setMaximized(maximized);
+    }
+
+    @Override
+    public void close() {
+        handleClose();
+    }
+
+    @Override
+    public boolean isMaximized() {
+        return maximized;
+    }
+
+    private void handleClose() {
+        disconnect();
+        dispose();
+        System.exit(0);
+    }
+
+    /** 主题切换会重建表格 UI，这里统一恢复列宽、行高与边框。 */
+    private void applyFileTableLayout() {
+        styleTable(fileTable);
+        styleTable(queueTable);
+        styleTable(speedTable);
+        if (fileTable.getColumnModel().getColumnCount() >= 4) {
+            fileTable.getColumnModel().getColumn(0).setPreferredWidth(400);
+            fileTable.getColumnModel().getColumn(1).setPreferredWidth(70);
+            fileTable.getColumnModel().getColumn(2).setPreferredWidth(100);
+            fileTable.getColumnModel().getColumn(3).setPreferredWidth(170);
+        }
+        if (queueTable.getColumnModel().getColumnCount() >= 3) {
+            queueTable.getColumnModel().getColumn(0).setPreferredWidth(150);
+            queueTable.getColumnModel().getColumn(1).setPreferredWidth(520);
+            queueTable.getColumnModel().getColumn(2).setPreferredWidth(90);
+        }
+        if (speedTable.getColumnModel().getColumnCount() >= 2) {
+            speedTable.getColumnModel().getColumn(0).setPreferredWidth(140);
+            speedTable.getColumnModel().getColumn(1).setPreferredWidth(140);
+        }
+        Border border = BorderFactory.createLineBorder(ThemeManager.palette().border);
+        normalFileScrollBorder = border;
+        if (!dropHighlightActive) {
+            fileScroll.setBorder(border);
+        }
+    }
+
+    private void styleTable(JTable table) {
+        table.setRowHeight(26);
+        table.setShowVerticalLines(false);
+        table.setShowHorizontalLines(true);
+        table.setIntercellSpacing(new Dimension(0, 0));
+        table.setFillsViewportHeight(true);
+        JTableHeader header = table.getTableHeader();
+        header.setReorderingAllowed(false);
+        header.setPreferredSize(new Dimension(0, 32));
+        header.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, ThemeManager.palette().border));
     }
 
     /** 外观菜单：跟随系统 / 浅色 / 深色，选择持久化到 GuiConfig。 */
     private JMenuBar buildMenuBar() {
         JMenuBar bar = new JMenuBar();
+        bar.setOpaque(false);
+        bar.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 8));
         JMenu menu = new JMenu(GuiStrings.get("menuAppearance"));
         ButtonGroup group = new ButtonGroup();
         String mode = ThemeManager.getMode();
@@ -220,75 +302,120 @@ public class MainFrame extends JFrame {
     }
 
     private JPanel buildTopPanel() {
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        JPanel connect = new JPanel(new GridBagLayout());
+        connect.setOpaque(false);
+        connect.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("connectGroup")));
 
-        JPanel portRow = new JPanel(new GridBagLayout());
-        portRow.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("connectGroup")));
         GridBagConstraints c = new GridBagConstraints();
-        c.insets = new Insets(4, 4, 4, 4);
+        c.insets = new Insets(6, 8, 6, 8);
         c.anchor = GridBagConstraints.WEST;
+        c.gridy = 0;
+
         c.gridx = 0;
-        portRow.add(new JLabel(GuiStrings.get("port")), c);
+        connect.add(new JLabel(GuiStrings.get("port")), c);
+
         c.gridx = 1;
-        portRow.add(portSpinner, c);
+        portSpinner.setPreferredSize(new Dimension(96, 30));
+        connect.add(portSpinner, c);
+
         c.gridx = 2;
-        portRow.add(new JLabel(GuiStrings.get("receiveDir")), c);
+        connect.add(new JLabel(GuiStrings.get("receiveDir")), c);
+
         c.gridx = 3;
         c.weightx = 1;
         c.fill = GridBagConstraints.HORIZONTAL;
         receiveDirField.setText(GuiConfig.getReceiveDir());
+        receiveDirField.setMargin(new Insets(4, 8, 4, 8));
+        receiveDirField.setPreferredSize(new Dimension(360, 30));
         receiveDirField.addActionListener(e -> applyReceiveDir());
-        portRow.add(receiveDirField, c);
+        connect.add(receiveDirField, c);
+
         c.gridx = 4;
         c.weightx = 0;
         c.fill = GridBagConstraints.NONE;
         JButton browseButton = new JButton(GuiStrings.get("browse"));
+        sizeButton(browseButton, 92);
         browseButton.addActionListener(e -> chooseReceiveDir());
-        portRow.add(browseButton, c);
-        panel.add(portRow);
+        connect.add(browseButton, c);
 
+        c.gridy = 1;
+        c.gridx = 0;
+        c.gridwidth = 5;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.BOTH;
+        c.insets = new Insets(2, 8, 8, 8);
         JTabbedPane tabs = new JTabbedPane();
-        JPanel adbPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints ac = new GridBagConstraints();
-        ac.insets = new Insets(4, 4, 4, 4);
-        ac.anchor = GridBagConstraints.WEST;
-        ac.gridx = 0;
-        adbPanel.add(new JLabel(GuiStrings.get("device")), ac);
-        ac.gridx = 1;
-        ac.weightx = 1;
-        ac.fill = GridBagConstraints.HORIZONTAL;
-        adbPanel.add(deviceBox, ac);
-        ac.gridx = 2;
-        ac.weightx = 0;
-        ac.fill = GridBagConstraints.NONE;
-        adbPanel.add(refreshButton, ac);
-        ac.gridx = 3;
-        adbPanel.add(connectAdbButton, ac);
-        tabs.addTab(GuiStrings.get("tabAdb"), adbPanel);
+        tabs.addTab(GuiStrings.get("tabAdb"), buildAdbPanel());
+        tabs.addTab(GuiStrings.get("tabLan"), buildLanPanel());
+        connect.add(tabs, c);
+        return connect;
+    }
 
-        JPanel lanPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints lc = new GridBagConstraints();
-        lc.insets = new Insets(4, 4, 4, 4);
-        lc.anchor = GridBagConstraints.WEST;
-        lc.gridx = 0;
-        lanPanel.add(new JLabel(GuiStrings.get("phoneIp")), lc);
-        lc.gridx = 1;
-        lc.weightx = 1;
-        lc.fill = GridBagConstraints.HORIZONTAL;
-        lanPanel.add(hostField, lc);
-        lc.gridx = 2;
-        lc.weightx = 0;
-        lc.fill = GridBagConstraints.NONE;
-        lanPanel.add(connectLanButton, lc);
-        tabs.addTab(GuiStrings.get("tabLan"), lanPanel);
-        panel.add(tabs);
+    private JPanel buildAdbPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(3, 4, 3, 8);
+        c.anchor = GridBagConstraints.WEST;
+        c.gridy = 0;
+        c.gridx = 0;
+        panel.add(new JLabel(GuiStrings.get("device")), c);
+
+        c.gridx = 1;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        deviceBox.setPreferredSize(new Dimension(320, 30));
+        panel.add(deviceBox, c);
+
+        c.gridx = 2;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        sizeButton(refreshButton, 110);
+        panel.add(refreshButton, c);
+
+        c.gridx = 3;
+        sizeButton(connectAdbButton, 132);
+        panel.add(connectAdbButton, c);
         return panel;
+    }
+
+    private JPanel buildLanPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(3, 4, 3, 8);
+        c.anchor = GridBagConstraints.WEST;
+        c.gridy = 0;
+        c.gridx = 0;
+        panel.add(new JLabel(GuiStrings.get("phoneIp")), c);
+
+        c.gridx = 1;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        hostField.setMargin(new Insets(4, 8, 4, 8));
+        hostField.setPreferredSize(new Dimension(260, 30));
+        panel.add(hostField, c);
+
+        c.gridx = 2;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        sizeButton(connectLanButton, 132);
+        panel.add(connectLanButton, c);
+        return panel;
+    }
+
+    /** 统一按钮高度，宽度不低于给定值。 */
+    private static void sizeButton(JButton button, int minWidth) {
+        Dimension preferred = button.getPreferredSize();
+        button.setPreferredSize(new Dimension(Math.max(preferred.width, minWidth), 30));
     }
 
     private JSplitPane buildCenterPanel() {
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        logArea.setMargin(new Insets(8, 10, 8, 10));
         JScrollPane logScroll = new JScrollPane(logArea);
         logScroll.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("logTitle")));
 
@@ -298,17 +425,32 @@ public class MainFrame extends JFrame {
 
         JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tabs, logScroll);
         splitPane.setResizeWeight(0.62);
+        splitPane.setBorder(BorderFactory.createEmptyBorder());
         return splitPane;
     }
 
     private JPanel buildFilePanel() {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        JPanel toolbar = new JPanel(new BorderLayout(4, 4));
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 2, 2, 2));
+
+        JPanel toolbar = new JPanel(new BorderLayout(10, 0));
+        toolbar.setOpaque(false);
         remotePathField.setEditable(false);
         remotePathField.setText("/");
+        remotePathField.setMargin(new Insets(4, 8, 4, 8));
+        remotePathField.setPreferredSize(new Dimension(200, 30));
+        remotePathField.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(ThemeManager.palette().border),
+                BorderFactory.createEmptyBorder(0, 6, 0, 6)));
         toolbar.add(remotePathField, BorderLayout.CENTER);
 
-        JPanel buttons = new JPanel();
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttons.setOpaque(false);
+        sizeButton(upButton, 100);
+        sizeButton(refreshFilesButton, 86);
+        sizeButton(pullButton, 110);
+        sizeButton(pushButton, 110);
         buttons.add(upButton);
         buttons.add(refreshFilesButton);
         buttons.add(pullButton);
@@ -358,7 +500,7 @@ public class MainFrame extends JFrame {
                 updateDropHighlight(false, null);
                 if (!dtde.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
                     dtde.rejectDrop();
-                    showDropMessage(GuiStrings.get("dropUnsupported"), JOptionPane.WARNING_MESSAGE);
+                    showDropMessage(GuiStrings.get("dropUnsupported"));
                     return;
                 }
                 dtde.acceptDrop(DnDConstants.ACTION_COPY);
@@ -376,7 +518,7 @@ public class MainFrame extends JFrame {
                     }
                 } catch (Exception e) {
                     dtde.dropComplete(false);
-                    showDropMessage(GuiStrings.get("dropUnsupported"), JOptionPane.WARNING_MESSAGE);
+                    showDropMessage(GuiStrings.get("dropUnsupported"));
                     return;
                 }
                 dtde.dropComplete(true);
@@ -403,6 +545,7 @@ public class MainFrame extends JFrame {
     }
 
     private void updateDropHighlight(boolean active, String targetPath) {
+        dropHighlightActive = active;
         if (active) {
             fileScroll.setBorder(BorderFactory.createLineBorder(DROP_HIGHLIGHT, 2));
             setStatus(client == null ? GuiStrings.get("dropNotConnected")
@@ -419,15 +562,15 @@ public class MainFrame extends JFrame {
     /** 拖入的路径校验与推送；未连接、忙或内容非法时给出明确提示。 */
     private void handleDropFiles(List<File> files, String targetPath) {
         if (client == null) {
-            showDropMessage(GuiStrings.get("dropNotConnected"), JOptionPane.WARNING_MESSAGE);
+            showDropMessage(GuiStrings.get("dropNotConnected"));
             return;
         }
         if (transferActive) {
-            showDropMessage(GuiStrings.get("dropBusy"), JOptionPane.WARNING_MESSAGE);
+            showDropMessage(GuiStrings.get("dropBusy"));
             return;
         }
         if (files == null || files.isEmpty()) {
-            showDropMessage(GuiStrings.get("dropEmpty"), JOptionPane.WARNING_MESSAGE);
+            showDropMessage(GuiStrings.get("dropEmpty"));
             return;
         }
         List<File> valid = new ArrayList<>();
@@ -443,29 +586,38 @@ public class MainFrame extends JFrame {
             log(GuiStrings.get("dropInvalid", invalid.size(), String.join(", ", invalid)), true);
         }
         if (valid.isEmpty()) {
-            showDropMessage(GuiStrings.get("dropEmpty"), JOptionPane.WARNING_MESSAGE);
+            showDropMessage(GuiStrings.get("dropEmpty"));
             return;
         }
         log(GuiStrings.get("dropAccepted", valid.size(), targetPath));
         pushLocalFiles(valid, targetPath);
     }
 
-    private void showDropMessage(String message, int type) {
-        JOptionPane.showMessageDialog(this, message, GuiStrings.get("tabFiles"), type);
+    private void showDropMessage(String message) {
+        ThemedDialog.warn(this, GuiStrings.get("tabFiles"), message);
     }
 
     private JPanel buildTransferPanel() {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.add(new JScrollPane(queueTable), BorderLayout.CENTER);
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 2, 2, 2));
+        JScrollPane queueScroll = new JScrollPane(queueTable);
+        queueScroll.setBorder(BorderFactory.createLineBorder(ThemeManager.palette().border));
+        panel.add(queueScroll, BorderLayout.CENTER);
         JScrollPane speedScroll = new JScrollPane(speedTable);
-        speedScroll.setPreferredSize(new Dimension(240, 120));
+        speedScroll.setPreferredSize(new Dimension(240, 130));
         speedScroll.setBorder(BorderFactory.createTitledBorder(GuiStrings.get("channelSpeed")));
         panel.add(speedScroll, BorderLayout.SOUTH);
         return panel;
     }
 
     private JPanel buildBottomPanel() {
-        JPanel panel = new JPanel(new BorderLayout(8, 0));
+        JPanel panel = new JPanel(new BorderLayout(12, 0));
+        panel.setOpaque(false);
+        panel.setBorder(BorderFactory.createEmptyBorder(2, 4, 0, 4));
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+        progressBar.setPreferredSize(new Dimension(0, 22));
+        sizeButton(disconnectButton, 96);
         panel.add(statusLabel, BorderLayout.WEST);
         panel.add(progressBar, BorderLayout.CENTER);
         panel.add(disconnectButton, BorderLayout.EAST);
@@ -473,11 +625,10 @@ public class MainFrame extends JFrame {
     }
 
     private void chooseReceiveDir() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setSelectedFile(new File(receiveDirField.getText()));
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            receiveDirField.setText(chooser.getSelectedFile().getAbsolutePath());
+        File selected = ThemedDialog.chooseDirectory(this, GuiStrings.get("chooseDirTitle"),
+                new File(receiveDirField.getText()));
+        if (selected != null) {
+            receiveDirField.setText(selected.getAbsolutePath());
             applyReceiveDir();
         }
     }
@@ -485,15 +636,14 @@ public class MainFrame extends JFrame {
     private void applyReceiveDir() {
         String dir = receiveDirField.getText().trim();
         if (dir.isEmpty()) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirEmpty"),
-                    GuiStrings.get("tabTransfer"), JOptionPane.WARNING_MESSAGE);
+            ThemedDialog.warn(this, GuiStrings.get("tabTransfer"), GuiStrings.get("receiveDirEmpty"));
             receiveDirField.setText(GuiConfig.getReceiveDir());
             return;
         }
         File file = new File(dir);
         if (!file.exists() && !file.mkdirs()) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirCreateFailed", dir),
-                    GuiStrings.get("tabTransfer"), JOptionPane.ERROR_MESSAGE);
+            ThemedDialog.error(this, GuiStrings.get("tabTransfer"),
+                    GuiStrings.get("receiveDirCreateFailed", dir));
             return;
         }
         GuiConfig.setReceiveDir(dir);
@@ -539,14 +689,13 @@ public class MainFrame extends JFrame {
     private void connectViaAdb() {
         AdbUtil.AdbDevice device = (AdbUtil.AdbDevice) deviceBox.getSelectedItem();
         if (device == null) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("selectDevice"),
-                    GuiStrings.get("tabAdb"), JOptionPane.WARNING_MESSAGE);
+            ThemedDialog.warn(this, GuiStrings.get("tabAdb"), GuiStrings.get("selectDevice"));
             return;
         }
         if (!"device".equals(device.state)) {
-            JOptionPane.showMessageDialog(this,
-                    GuiStrings.get("deviceNotReady", device.stateText()) + "\n" + GuiStrings.get("deviceNotReadyHint"),
-                    GuiStrings.get("tabAdb"), JOptionPane.WARNING_MESSAGE);
+            ThemedDialog.warn(this, GuiStrings.get("tabAdb"),
+                    GuiStrings.get("deviceNotReady", device.stateText()) + "\n"
+                            + GuiStrings.get("deviceNotReadyHint"));
             return;
         }
         startConnect("127.0.0.1", device.serial);
@@ -555,8 +704,7 @@ public class MainFrame extends JFrame {
     private void connectViaLan() {
         String host = hostField.getText().trim();
         if (host.isEmpty()) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("phoneIpEmpty"),
-                    GuiStrings.get("tabLan"), JOptionPane.WARNING_MESSAGE);
+            ThemedDialog.warn(this, GuiStrings.get("tabLan"), GuiStrings.get("phoneIpEmpty"));
             return;
         }
         startConnect(host, null);
@@ -745,8 +893,7 @@ public class MainFrame extends JFrame {
     private void pullSelected() {
         int[] rows = fileTable.getSelectedRows();
         if (rows.length == 0) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("selectToPull"),
-                    GuiStrings.get("tabFiles"), JOptionPane.WARNING_MESSAGE);
+            ThemedDialog.warn(this, GuiStrings.get("tabFiles"), GuiStrings.get("selectToPull"));
             return;
         }
         List<RemoteFile> files = new ArrayList<>();
@@ -759,8 +906,8 @@ public class MainFrame extends JFrame {
         String receiveDir = receiveDirField.getText().trim();
         File localDir = new File(receiveDir);
         if (!localDir.exists() && !localDir.mkdirs()) {
-            JOptionPane.showMessageDialog(this, GuiStrings.get("receiveDirUnavailable", receiveDir),
-                    GuiStrings.get("tabFiles"), JOptionPane.ERROR_MESSAGE);
+            ThemedDialog.error(this, GuiStrings.get("tabFiles"),
+                    GuiStrings.get("receiveDirUnavailable", receiveDir));
             return;
         }
         String sourceDirPath = currentRemotePath;
@@ -774,13 +921,7 @@ public class MainFrame extends JFrame {
     }
 
     private void pushFiles() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setMultiSelectionEnabled(true);
-        chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
-            return;
-        }
-        File[] selected = chooser.getSelectedFiles();
+        File[] selected = ThemedDialog.chooseFiles(this, GuiStrings.get("chooseFileTitle"));
         if (selected == null || selected.length == 0) {
             return;
         }
@@ -1014,6 +1155,11 @@ public class MainFrame extends JFrame {
 
     /** 供启动入口使用。 */
     public static void showWindow() {
-        SwingUtilities.invokeLater(() -> new MainFrame().setVisible(true));
+        SwingUtilities.invokeLater(() -> {
+            // 必须在创建 MainFrame 之前应用主题：界面控件的底色在字段初始化时
+            // 就从 UIDefaults 读取，晚于此步会留下白底输入框/表格。
+            ThemeManager.init();
+            new MainFrame().setVisible(true);
+        });
     }
 }

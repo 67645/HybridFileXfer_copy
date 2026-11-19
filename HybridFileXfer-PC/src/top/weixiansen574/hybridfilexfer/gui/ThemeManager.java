@@ -4,11 +4,15 @@ import javax.swing.BorderFactory;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.plaf.ColorUIResource;
+import javax.swing.plaf.InsetsUIResource;
 import javax.swing.plaf.metal.DefaultMetalTheme;
 import javax.swing.plaf.metal.MetalLookAndFeel;
 import javax.swing.plaf.metal.OceanTheme;
+import java.awt.Font;
+import java.awt.GraphicsEnvironment;
 import java.awt.Window;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,6 +33,7 @@ public final class ThemeManager {
     private static boolean darkApplied;
     private static boolean initialized;
     private static ScheduledExecutorService watcher;
+    private static Palette currentPalette = lightPalette();
 
     private ThemeManager() {
     }
@@ -60,6 +65,11 @@ public final class ThemeManager {
         return darkApplied;
     }
 
+    /** 当前主题调色板，供自绘标题栏等组件取色。 */
+    public static Palette palette() {
+        return currentPalette;
+    }
+
     public static synchronized void addListener(Runnable listener) {
         LISTENERS.add(listener);
     }
@@ -71,6 +81,7 @@ public final class ThemeManager {
         currentMode = normalized;
         darkApplied = dark;
         Palette palette = dark ? darkPalette() : lightPalette();
+        currentPalette = palette;
         installLookAndFeel(dark);
         putDefaults(palette, dark);
         for (Window window : Window.getWindows()) {
@@ -138,22 +149,25 @@ public final class ThemeManager {
     }
 
     /** 调色板：浅色与深色各一套，切换时整表覆盖。 */
-    private static final class Palette {
-        ColorUIResource background;
-        ColorUIResource surface;
-        ColorUIResource field;
-        ColorUIResource text;
-        ColorUIResource dim;
-        ColorUIResource border;
-        ColorUIResource selection;
-        ColorUIResource selectedText;
-        ColorUIResource accent;
-        ColorUIResource scroll;
-        ColorUIResource thumbHighlight;
-        ColorUIResource thumbShadow;
-        ColorUIResource track;
-        ColorUIResource button;
-        ColorUIResource tooltip;
+    public static final class Palette {
+        public ColorUIResource background;
+        public ColorUIResource surface;
+        public ColorUIResource field;
+        public ColorUIResource text;
+        public ColorUIResource dim;
+        public ColorUIResource border;
+        public ColorUIResource selection;
+        public ColorUIResource selectedText;
+        public ColorUIResource accent;
+        public ColorUIResource scroll;
+        public ColorUIResource thumbHighlight;
+        public ColorUIResource thumbShadow;
+        public ColorUIResource track;
+        public ColorUIResource button;
+        public ColorUIResource tooltip;
+        public ColorUIResource titleHover;
+        public ColorUIResource closeHover;
+        public ColorUIResource hoverText;
     }
 
     private static Palette darkPalette() {
@@ -173,6 +187,9 @@ public final class ThemeManager {
         p.track = color(0x262626);
         p.button = color(0x3C3F41);
         p.tooltip = color(0x3A3A3A);
+        p.titleHover = color(0x3C3C3C);
+        p.closeHover = color(0xE81123);
+        p.hoverText = color(0xFFFFFF);
         return p;
     }
 
@@ -193,6 +210,9 @@ public final class ThemeManager {
         p.track = color(0xE6E6E6);
         p.button = color(0xECECEC);
         p.tooltip = color(0xFFFFD8);
+        p.titleHover = color(0xE2E2E2);
+        p.closeHover = color(0xE81123);
+        p.hoverText = color(0xFFFFFF);
         return p;
     }
 
@@ -231,6 +251,8 @@ public final class ThemeManager {
         UIManager.put("Table.focusCellForeground", p.selectedText);
         UIManager.put("Table.dropLineColor", p.accent);
         UIManager.put("Table.dropCellBackground", p.field);
+        UIManager.put("TableHeader.cellBorder",
+                new javax.swing.border.EmptyBorder(0, 10, 0, 10));
         UIManager.put("TableHeader.background", p.background);
         UIManager.put("TableHeader.foreground", p.text);
         UIManager.put("TableHeader.selectionBackground", p.selection);
@@ -304,9 +326,42 @@ public final class ThemeManager {
         UIManager.put("Tree.selectionBackground", p.selection);
         UIManager.put("Tree.selectionForeground", p.selectedText);
 
+        Font uiFont = uiFont();
+        for (String key : new String[]{"Button.font", "Label.font", "TextField.font", "TextArea.font",
+                "TextPane.font", "EditorPane.font", "PasswordField.font", "FormattedTextField.font",
+                "Table.font", "TableHeader.font", "List.font", "ComboBox.font", "Menu.font", "MenuItem.font",
+                "MenuBar.font", "PopupMenu.font", "TabbedPane.font", "TitledBorder.font", "ToolTip.font",
+                "OptionPane.messageFont", "OptionPane.buttonFont", "Spinner.font", "Tree.font", "Panel.font",
+                "ProgressBar.font", "FileChooser.font"}) {
+            UIManager.put(key, uiFont);
+        }
+        UIManager.put("TitledBorder.font", uiFont.deriveFont(Font.BOLD, 12f));
+        UIManager.put("Button.margin", new InsetsUIResource(5, 14, 5, 14));
+        UIManager.put("TabbedPane.tabInsets", new InsetsUIResource(7, 14, 7, 14));
+        UIManager.put("TabbedPane.tabAreaInsets", new InsetsUIResource(6, 6, 0, 6));
+        UIManager.put("SplitPane.dividerSize", 6);
+
         if (dark) {
             UIManager.put("OptionPane.messageForeground", p.text);
         }
+    }
+
+    /** 统一界面字体，优先使用中文显示效果更好的字体。 */
+    private static Font uiFont() {
+        String[] candidates = {"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", Font.DIALOG};
+        List<String> families;
+        try {
+            families = Arrays.asList(GraphicsEnvironment.getLocalGraphicsEnvironment()
+                    .getAvailableFontFamilyNames());
+        } catch (Exception e) {
+            families = new ArrayList<>();
+        }
+        for (String name : candidates) {
+            if (families.contains(name)) {
+                return new Font(name, Font.PLAIN, 13);
+            }
+        }
+        return new Font(Font.DIALOG, Font.PLAIN, 13);
     }
 
     private static void put(String[] keys, ColorUIResource value) {
