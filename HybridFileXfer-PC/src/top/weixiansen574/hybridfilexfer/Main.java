@@ -5,6 +5,7 @@
 package top.weixiansen574.hybridfilexfer;
 
 import top.weixiansen574.hybridfilexfer.core.Utils;
+import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.bean.TrafficInfo;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
 import top.weixiansen574.hybridfilexfer.core.callback.ConnectServerCallback;
@@ -168,6 +169,22 @@ public class Main {
         String homeDir = paramMap.get("-d");  //因为会修改为默认位置，所以不可以设置为不可变变量
         final String device = paramMap.get("-s");
 
+        // 端口可配置，默认 5740
+        int port = 5740;
+        String portValue = paramMap.get("-p");
+        if (portValue != null && !portValue.isEmpty()) {
+            try {
+                port = Integer.parseInt(portValue);
+            } catch (NumberFormatException e) {
+                System.err.println("端口格式不正确：" + portValue);
+                return;
+            }
+            if (port < 1 || port > 65535) {
+                System.err.println("端口超出范围：" + port);
+                return;
+            }
+        }
+
         // 指定默认目录
         if (homeDir == null) {
             homeDir = "/";
@@ -183,7 +200,7 @@ public class Main {
         // 设置服务器地址
         final String serverAddress;
         if (connect.equals("adb")) {
-            if (executeAdbForwardCommand(5740, device)) {
+            if (executeAdbForwardCommand(port, device)) {
                 System.out.println(Strings.get("adb_forward_succeed"));
                 serverAddress = "127.0.0.1";
             } else {
@@ -193,10 +210,40 @@ public class Main {
             serverAddress = connect;
         }
 
-        JdkHFXClient hfxClient = new JdkHFXClient(serverAddress, 5740, homeDir);
-        if (hfxClient.connect(connectServerCallback)) {
-            hfxClient.start(clientCallBack);
+        JdkHFXClient hfxClient = new JdkHFXClient(serverAddress, port, homeDir);
+        String protocol = paramMap.get("--protocol");
+        boolean connected;
+        if ("auto".equalsIgnoreCase(protocol)) {
+            connected = hfxClient.connectAuto(connectServerCallback);
+        } else if ("301".equals(protocol)) {
+            hfxClient.setPreferredProtocolVersion(301);
+            connected = hfxClient.connect(connectServerCallback);
+        } else {
+            connected = hfxClient.connect(connectServerCallback);
         }
+        if (!connected) {
+            System.out.println("连接失败，已退出");
+            return;
+        }
+        if (paramMap.containsKey("--list")) {
+            String listPath = paramMap.get("--list");
+            System.out.println("protocol=" + hfxClient.getProtocolVersion());
+            try {
+                List<RemoteFile> files = hfxClient.requestListFiles(listPath == null ? "/" : listPath);
+                if (files == null) {
+                    System.out.println("目录不可读");
+                } else {
+                    for (RemoteFile file : files) {
+                        System.out.println((file.isDirectory() ? "[D] " : "[F] ") + file.getPath() + "\t" + file.getSize());
+                    }
+                    System.out.println("count=" + files.size());
+                }
+            } catch (IOException e) {
+                System.err.println("列出目录失败：" + e.getMessage());
+            }
+            return;
+        }
+        hfxClient.start(clientCallBack);
     }
 
     /**
@@ -233,14 +280,19 @@ public class Main {
                 switch (key){
                     case "--connect":       key = "-c"; break;
                     case "--switch-device": key = "-s"; break;
+                    case "--device":        key = "-s"; break;
                     case "--dir":           key = "-d"; break;
+                    case "--port":          key = "-p"; break;
                     case "--help":          key = "-h"; break;
                     case "--version":       key = "-v"; break;
                     case "-c":
                     case "-s":
                     case "-d":
+                    case "-p":
                     case "-h":
                     case "-v":
+                    case "--protocol":
+                    case "--list":
                         break;
                     default: // 非法参数处理
                         if (arg.startsWith("-")) {

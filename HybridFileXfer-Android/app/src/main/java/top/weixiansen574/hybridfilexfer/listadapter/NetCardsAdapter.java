@@ -103,6 +103,22 @@ public class NetCardsAdapter extends RecyclerView.Adapter<NetCardsAdapter.ViewHo
         }
     }
 
+    /**
+     * 会话结束后，仅把显示为“已连接”的网卡恢复为“等待连接”，
+     * 保留本次握手失败的网卡的“连接失败”状态，避免掩盖真实情况。
+     */
+    public void resetConnectedState() {
+        String connected = context.getString(R.string.yi_lian_jie);
+        String waiting = context.getString(R.string.deng_dai_lian_jie);
+        for (int i = 0; i < netInterfaceList.size(); i++) {
+            ItemServerNetInterface item = netInterfaceList.get(i);
+            if (connected.equals(item.state)) {
+                item.state = waiting;
+                notifyItemChanged(i);
+            }
+        }
+    }
+
     @Override
     public int getItemViewType(int position) {
         return position;

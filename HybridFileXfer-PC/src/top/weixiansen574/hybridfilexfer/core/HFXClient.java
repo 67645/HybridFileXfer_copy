@@ -4,7 +4,10 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -14,15 +17,25 @@ import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
 import top.weixiansen574.hybridfilexfer.core.callback.ConnectServerCallback;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcCodec;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcFileOps;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
 import top.weixiansen574.nio.DataByteChannel;
 
-public abstract class HFXClient extends HFXService {
+public abstract class HFXClient extends HFXService implements RpcFileOps {
+
+    /** 单条通道的 TCP 连接超时，避免某张不可达网卡让整个握手一直卡住。 */
+    protected static final int CONNECT_TIMEOUT_MS = 5000;
 
     protected final String serverControllerAddress;
     protected final int serverPort;
     protected final String homeDir;
     protected boolean isRun = true;
     protected ClientCallBack callBack;
+    private int preferredVersion = RpcProtocol.VERSION_LEGACY;
+    private int remoteVersion = -1;
 
     public HFXClient(String serverControllerAddress, int serverPort,String homeDir) {
         this.serverControllerAddress = serverControllerAddress;
@@ -30,18 +43,56 @@ public abstract class HFXClient extends HFXService {
         this.homeDir = homeDir;
     }
 
+    /** 指定首选协议版本（300 或 301）。 */
+    public void setPreferredProtocolVersion(int version) {
+        if (version != RpcProtocol.VERSION_LEGACY && version != RpcProtocol.VERSION_RPC) {
+            throw new IllegalArgumentException("不支持的协议版本：" + version);
+        }
+        this.preferredVersion = version;
+    }
+
+    public int getRemoteProtocolVersion() {
+        return remoteVersion;
+    }
+
+    /**
+     * 先尝试 301；若对端只支持 300，则重新建连并以 300 完成握手。
+     */
+    public boolean connectAuto(ConnectServerCallback callback) throws IOException {
+        if (connectWithVersion(RpcProtocol.VERSION_RPC, callback)) {
+            return true;
+        }
+        if (remoteVersion == RpcProtocol.VERSION_LEGACY) {
+            resetConnectionState();
+            return connectWithVersion(RpcProtocol.VERSION_LEGACY, callback);
+        }
+        return false;
+    }
+
     public boolean connect(ConnectServerCallback callback) throws IOException {
+        return connectWithVersion(preferredVersion, callback);
+    }
+
+    private void resetConnectionState() {
+        ctChannel = null;
+        connections = null;
+        rpc = null;
+        buffers.clear();
+        isRun = true;
+    }
+
+    private boolean connectWithVersion(int version, ConnectServerCallback callback) throws IOException {
         try {
             //System.out.println("正在连接控制通道：" + serverControllerAddress);
             callback.onConnectingControlChannel(serverControllerAddress, serverPort);
-            ctChannel = new DataByteChannel(SocketChannel
-                    .open(new InetSocketAddress(serverControllerAddress,serverPort)));
+            ctChannel = new DataByteChannel(connectChannel(
+                    new InetSocketAddress(serverControllerAddress, serverPort), null));
 
             ctChannel.write(CLIENT_HEADER.getBytes(StandardCharsets.UTF_8));
-            ctChannel.writeInt(VERSION_CODE);
+            ctChannel.writeInt(version);
             if (!ctChannel.readBoolean()) {
-                //System.out.println("版本不一致，你的版本：" + VERSION_CODE + "，对方版本：" + ctChannel.readInt());
-                callback.onVersionMismatch(VERSION_CODE, ctChannel.readInt());
+                remoteVersion = ctChannel.readInt();
+                callback.onVersionMismatch(version, remoteVersion);
                 ctChannel.close();
                 return false;
             }
@@ -72,77 +123,131 @@ public abstract class HFXClient extends HFXService {
             bindAddresses[i] = bindAddress;
         }
         connections = new ArrayList<>(ipCount);
-        for (int i = 0; i < ipCount; i++) {
-            SocketChannel socketChannel;
-            String name = names[i];
-            InetAddress inetAddress = addresses[i];
-            InetAddress bindAddress = bindAddresses[i];
-            /*System.out.printf("正在连接 网卡名：%s 远程地址：%s 绑定地址：%s\n", name, inetAddress.getHostAddress(), bindAddress == null ?
-                    "null" : bindAddress.getHostAddress());*/
-            callback.onConnectingTransferChannel(name, inetAddress, bindAddress);
-            /*if (name.equals("USB_ADB") && !serverControllerAddress.equals("127.0.0.1")) {
-                System.err.println("错误：你在手机上选用了USB_ADB网卡，但没有使用ADB进行连接");
-                ctChannel.writeBoolean(false);
-                socket.close();
-                return false;
-            }*/
-            try {
-                if (bindAddress == null) {
-                    socketChannel = SocketChannel.open(new InetSocketAddress(inetAddress, serverPort));
-                } else {
-                    socketChannel = SocketChannel.open();
-                    socketChannel.bind(new InetSocketAddress(bindAddress, 0));
-                    socketChannel.connect(new InetSocketAddress(inetAddress, serverPort));
+        try {
+            for (int i = 0; i < ipCount; i++) {
+                String name = names[i];
+                InetAddress inetAddress = addresses[i];
+                InetAddress bindAddress = bindAddresses[i];
+                /*System.out.printf("正在连接 网卡名：%s 远程地址：%s 绑定地址：%s\n", name, inetAddress.getHostAddress(), bindAddress == null ?
+                        "null" : bindAddress.getHostAddress());*/
+                callback.onConnectingTransferChannel(name, inetAddress, bindAddress);
+                /*if (name.equals("USB_ADB") && !serverControllerAddress.equals("127.0.0.1")) {
+                    System.err.println("错误：你在手机上选用了USB_ADB网卡，但没有使用ADB进行连接");
+                    ctChannel.writeBoolean(false);
+                    socket.close();
+                    return false;
+                }*/
+                try {
+                    SocketChannel socketChannel = connectChannel(new InetSocketAddress(inetAddress, serverPort), bindAddress);
+                    connections.add(new TransferConnection(name, new DataByteChannel(socketChannel)));
+                } catch (IOException e) {
+                    //该网卡不可达：只跳过这张网卡，其余可达网卡继续协商，避免整个会话卡死在等待连接
+                    callback.onConnectTransferChannelFailed(name, inetAddress, e);
+                    ctChannel.writeBoolean(false);
+                    ctChannel.writeUTF(name);
+                    continue;
                 }
-                connections.add(new TransferConnection(name, new DataByteChannel(socketChannel)));
-            } catch (IOException e) {
-                callback.onConnectTransferChannelFailed(name,inetAddress, e);
-                ctChannel.writeBoolean(false);
+                ctChannel.writeBoolean(true);
                 ctChannel.writeUTF(name);
+                ctChannel.readBoolean();
+            }
+            //初始化缓冲区块
+            int bufferCount = ctChannel.readInt();
+            for (int i = 0; i < bufferCount; i++) {
+                ByteBuffer buffer = createBuffer(FileBlock.BLOCK_SIZE);
+                if (buffer != null) {
+                    buffers.add(buffer);
+                } else {
+                    String arch = System.getProperty("os.arch");
+                    long availableMemoryMB = getAvailableMemoryMB();
+                    freeBuffers();
+                    callback.onOOM(i, bufferCount, availableMemoryMB, arch);
+                    ctChannel.writeBoolean(false);
+                    ctChannel.close();
+                    return false;
+                }
+            }
+            ctChannel.writeBoolean(true);
+            if (!ctChannel.readBoolean()) {
+                callback.onRemoteOOM();
                 ctChannel.close();
                 return false;
             }
-            ctChannel.writeBoolean(true);
-            ctChannel.writeUTF(name);
-            ctChannel.readBoolean();
-        }
-        //初始化缓冲区块
-        int bufferCount = ctChannel.readInt();
-        for (int i = 0; i < bufferCount; i++) {
-            ByteBuffer buffer = createBuffer(FileBlock.BLOCK_SIZE);
-            if (buffer != null){
-                buffers.add(buffer);
-            } else {
-                String arch = System.getProperty("os.arch");
-                long availableMemoryMB = getAvailableMemoryMB();
-                /*System.out.println("内存不足，创建缓冲区块失败！请尝试调小缓冲区块数（1MB每块）。成功创建" + i + "块，需要"
-                        + bufferCount + "块。当前JVM最大内存：" + maxMemoryMB + "MB");
-                if (arch != null && !arch.contains("64")) {
-                    System.out.println("检测你正在使用32位Java，内存受限，建议使用64位Java");
-                }*/
-                freeBuffers();
-                callback.onOOM(i, bufferCount, availableMemoryMB, arch);
-                ctChannel.writeBoolean(false);
-                return false;
-            }
-        }
-        ctChannel.writeBoolean(true);
-        if (!ctChannel.readBoolean()) {
-            //System.out.println("连接失败，手机端内存不足，请调小缓存区块数");
-            callback.onRemoteOOM();
+            //返回文件系统信息给对方
+            ctChannel.writeInt(Directory.getCurrentFileSystem());
+            //返回主路径信息给对方
+            ctChannel.writeUTF(homeDir);
+        } catch (IOException e) {
+            closeConnections();
+            ctChannel.close();
             return false;
         }
-        //返回文件系统信息给对方
-        ctChannel.writeInt(Directory.getCurrentFileSystem());
-        //返回主路径信息给对方
-        ctChannel.writeUTF(homeDir);
         //System.out.println("传输通道已全部连接完成");
         List<String> channelNames = new ArrayList<>(connections.size());
         for (TransferConnection connection : connections) {
             channelNames.add(connection.iName);
         }
         callback.onConnectSuccess(channelNames);
+        protocolVersion = version;
+        if (version == RpcProtocol.VERSION_RPC) {
+            rpc = new RpcPeer(ctChannel, this, "Client");
+        }
         return true;
+    }
+
+    /**
+     * 带超时地建立一条 TCP 通道，超时或失败时抛出 IOException。
+     *
+     * @param target      目标地址
+     * @param bindAddress 本端需要绑定的网卡地址，可为 null
+     */
+    private static SocketChannel connectChannel(InetSocketAddress target, InetAddress bindAddress) throws IOException {
+        SocketChannel channel = SocketChannel.open();
+        try {
+            if (bindAddress != null) {
+                channel.bind(new InetSocketAddress(bindAddress, 0));
+            }
+            channel.configureBlocking(false);
+            if (!channel.connect(target)) {
+                Selector selector = Selector.open();
+                try {
+                    channel.register(selector, SelectionKey.OP_CONNECT);
+                    long deadline = System.currentTimeMillis() + CONNECT_TIMEOUT_MS;
+                    while (!channel.finishConnect()) {
+                        long remain = deadline - System.currentTimeMillis();
+                        if (remain <= 0) {
+                            throw new SocketTimeoutException("连接超时：" + target);
+                        }
+                        if (selector.select(remain) == 0) {
+                            throw new SocketTimeoutException("连接超时：" + target);
+                        }
+                        selector.selectedKeys().clear();
+                    }
+                } finally {
+                    selector.close();
+                }
+            }
+            channel.configureBlocking(true);
+            return channel;
+        } catch (IOException e) {
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        }
+    }
+
+    private void closeConnections() {
+        if (connections != null) {
+            for (TransferConnection connection : connections) {
+                try {
+                    connection.close();
+                } catch (IOException ignored) {
+                }
+            }
+            connections.clear();
+        }
     }
 
     public abstract ByteBuffer createBuffer(int size);
@@ -151,6 +256,18 @@ public abstract class HFXClient extends HFXService {
 
     public void start(ClientCallBack transferFileCallback) throws Exception {
         this.callBack = transferFileCallback;
+        if (rpc != null) {
+            // 301 模式：命令与应答全部由 RpcPeer 的读线程处理
+            while (isRun) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            return;
+        }
         //LOOP
         while (isRun) {
             short id = ctChannel.readShort();
@@ -305,6 +422,62 @@ public abstract class HFXClient extends HFXService {
 
     protected void freeBuffers(){
         buffers.clear();
+    }
+
+    // ---------------- 301 双向帧：客户端主动请求 ----------------
+
+    private void requireRpc() throws IOException {
+        if (rpc == null) {
+            throw new IOException("当前为 300 兼容模式，对端不支持客户端主动请求");
+        }
+    }
+
+    /** 主动列出对端目录；301 模式专用。 */
+    public List<RemoteFile> requestListFiles(String path) throws IOException {
+        requireRpc();
+        RpcResult result = rpc.call(RpcProtocol.CMD_LIST_FILES, RpcCodec.encodePath(path));
+        return RpcCodec.decodeFileList(result.body);
+    }
+
+    public boolean requestDeleteFile(String path) throws IOException {
+        requireRpc();
+        RpcResult result = rpc.call(RpcProtocol.CMD_DELETE_FILE, RpcCodec.encodePath(path));
+        return RpcCodec.decodeBool(result.body);
+    }
+
+    public boolean requestMkdir(String parent, String child) throws IOException {
+        requireRpc();
+        RpcResult result = rpc.call(RpcProtocol.CMD_MKDIR, RpcCodec.encodeMkdir(parent, child));
+        return RpcCodec.decodeBool(result.body);
+    }
+
+    public RpcPeer getRpc() {
+        return rpc;
+    }
+
+    // ---------------- RpcFileOps：响应对端请求 ----------------
+
+    @Override
+    public final List<RemoteFile> rpcListFiles(String path) throws Exception {
+        return listFiles(path);
+    }
+
+    @Override
+    public final boolean rpcDeleteFile(String path) throws Exception {
+        return deleteLocalFile(path);
+    }
+
+    @Override
+    public final boolean rpcMkdir(String parent, String child) throws Exception {
+        return mkdir(parent, child);
+    }
+
+    @Override
+    public void rpcOnPeerClosed(String reason) {
+        isRun = false;
+        if (callBack != null) {
+            callBack.onExit();
+        }
     }
 
 }

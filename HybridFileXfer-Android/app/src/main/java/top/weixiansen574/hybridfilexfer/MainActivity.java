@@ -232,6 +232,19 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             }
 
             @Override
+            public void onDisconnected(String reason) {
+                //会话结束：服务端仍在监听，界面回到“等待连接”，无需手动停止再重启
+                toTransfer.setEnabled(false);
+                HFXServer.instance = null;
+                startServerBtn.setEnabled(true);
+                startServerBtn.setText(R.string.ting_zhi_fu_wu);
+                netCardsAdapter.resetConnectedState();
+                Toast.makeText(context,
+                        getString(R.string.duan_kai_lian_jie_deng_dai_zhong_xin_lian_jie, reason),
+                        Toast.LENGTH_SHORT).show();
+            }
+
+            @Override
             public void onError(Throwable th) {
                 Toast.makeText(context, R.string.fu_wu_yi_ting_zhi, Toast.LENGTH_SHORT).show();
                 changeToStartState();

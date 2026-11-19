@@ -11,14 +11,25 @@ import java.util.concurrent.LinkedBlockingDeque;
 import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.nio.DataByteChannel;
 
 public abstract class HFXService {
     public static final String CLIENT_HEADER = "HFXC";
-    public static final int VERSION_CODE = 300;
+    /** 旧版单向协议版本，保持与既有手机端一致。 */
+    public static final int VERSION_CODE = RpcProtocol.VERSION_LEGACY;
     protected final LinkedBlockingDeque<ByteBuffer> buffers = new LinkedBlockingDeque<>();
     protected DataByteChannel ctChannel;
     protected List<TransferConnection> connections;
+    /** 当前会话协商出的协议版本：300 或 301。 */
+    protected int protocolVersion = RpcProtocol.VERSION_LEGACY;
+    /** 301 模式下的双向帧通道；300 模式为 null。 */
+    protected RpcPeer rpc;
+
+    public int getProtocolVersion() {
+        return protocolVersion;
+    }
 
     protected boolean sendFiles(List<RemoteFile> fileList,Directory localDir, Directory remoteDir, TransferFileCallback callback) throws IOException {
         ReadFileCall readFileCall = createReadFileCall(buffers, fileList, localDir, remoteDir, connections.size());
