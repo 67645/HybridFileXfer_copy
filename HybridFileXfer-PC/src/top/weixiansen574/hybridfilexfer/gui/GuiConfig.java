@@ -28,6 +28,15 @@ public class GuiConfig {
         PREFERENCES.put("receive_dir", dir);
     }
 
+    /** 主题模式：system / light / dark。 */
+    public static String getTheme() {
+        return PREFERENCES.get("theme", ThemeManager.SYSTEM);
+    }
+
+    public static void setTheme(String theme) {
+        PREFERENCES.put("theme", theme);
+    }
+
     public static String getAdbPath() {
         return PREFERENCES.get("adb_path", null);
     }

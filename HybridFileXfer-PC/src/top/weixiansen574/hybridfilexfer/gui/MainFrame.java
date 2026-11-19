@@ -12,14 +12,18 @@ import top.weixiansen574.hybridfilexfer.jdkcore.JdkHFXClient;
 
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JMenu;
+import javax.swing.JMenuBar;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import javax.swing.JRadioButtonMenuItem;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JSplitPane;
@@ -29,13 +33,24 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
+import javax.swing.border.Border;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Point;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDragEvent;
+import java.awt.dnd.DropTargetDropEvent;
+import java.awt.dnd.DropTargetEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
@@ -77,7 +92,12 @@ public class MainFrame extends JFrame {
         }
     };
     private final JTable fileTable = new JTable(fileModel);
+    private final JScrollPane fileScroll = new JScrollPane(fileTable);
     private final List<RemoteFile> currentFiles = new ArrayList<>();
+    private static final Color DROP_HIGHLIGHT = new Color(0x3D74D0);
+
+    private Border normalFileScrollBorder;
+    private String statusBeforeDrag;
 
     private final DefaultTableModel queueModel = new DefaultTableModel(
             new Object[]{GuiStrings.get("colOperation"), GuiStrings.get("colPath"),
@@ -106,6 +126,7 @@ public class MainFrame extends JFrame {
 
     public MainFrame() {
         super(GuiStrings.get("title"));
+        ThemeManager.init();
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setMinimumSize(new Dimension(980, 680));
         setLayout(new BorderLayout(8, 8));
@@ -114,6 +135,7 @@ public class MainFrame extends JFrame {
         add(buildTopPanel(), BorderLayout.NORTH);
         add(buildCenterPanel(), BorderLayout.CENTER);
         add(buildBottomPanel(), BorderLayout.SOUTH);
+        setJMenuBar(buildMenuBar());
 
         disconnectButton.setEnabled(false);
         progressBar.setStringPainted(true);
@@ -154,9 +176,47 @@ public class MainFrame extends JFrame {
                 System.exit(0);
             }
         });
+        applyFileTableLayout();
+        ThemeManager.addListener(this::applyFileTableLayout);
         pack();
         setLocationRelativeTo(null);
         refreshDevices();
+    }
+
+    /** 主题切换会重建表格 UI，这里统一恢复列宽与行高。 */
+    private void applyFileTableLayout() {
+        fileTable.setRowHeight(22);
+        if (fileTable.getColumnModel().getColumnCount() >= 4) {
+            fileTable.getColumnModel().getColumn(0).setPreferredWidth(340);
+            fileTable.getColumnModel().getColumn(1).setPreferredWidth(60);
+            fileTable.getColumnModel().getColumn(2).setPreferredWidth(100);
+            fileTable.getColumnModel().getColumn(3).setPreferredWidth(150);
+        }
+    }
+
+    /** 外观菜单：跟随系统 / 浅色 / 深色，选择持久化到 GuiConfig。 */
+    private JMenuBar buildMenuBar() {
+        JMenuBar bar = new JMenuBar();
+        JMenu menu = new JMenu(GuiStrings.get("menuAppearance"));
+        ButtonGroup group = new ButtonGroup();
+        String mode = ThemeManager.getMode();
+        JRadioButtonMenuItem system = new JRadioButtonMenuItem(GuiStrings.get("themeSystem"),
+                ThemeManager.SYSTEM.equals(mode));
+        JRadioButtonMenuItem light = new JRadioButtonMenuItem(GuiStrings.get("themeLight"),
+                ThemeManager.LIGHT.equals(mode));
+        JRadioButtonMenuItem dark = new JRadioButtonMenuItem(GuiStrings.get("themeDark"),
+                ThemeManager.DARK.equals(mode));
+        system.addActionListener(e -> ThemeManager.setMode(ThemeManager.SYSTEM));
+        light.addActionListener(e -> ThemeManager.setMode(ThemeManager.LIGHT));
+        dark.addActionListener(e -> ThemeManager.setMode(ThemeManager.DARK));
+        group.add(system);
+        group.add(light);
+        group.add(dark);
+        menu.add(system);
+        menu.add(light);
+        menu.add(dark);
+        bar.add(menu);
+        return bar;
     }
 
     private JPanel buildTopPanel() {
@@ -256,13 +316,142 @@ public class MainFrame extends JFrame {
         toolbar.add(buttons, BorderLayout.EAST);
         panel.add(toolbar, BorderLayout.NORTH);
 
-        fileTable.setRowHeight(22);
-        fileTable.getColumnModel().getColumn(0).setPreferredWidth(340);
-        fileTable.getColumnModel().getColumn(1).setPreferredWidth(60);
-        fileTable.getColumnModel().getColumn(2).setPreferredWidth(100);
-        fileTable.getColumnModel().getColumn(3).setPreferredWidth(150);
-        panel.add(new JScrollPane(fileTable), BorderLayout.CENTER);
+        fileScroll.setToolTipText(GuiStrings.get("dropTooltip"));
+        installDropTarget();
+        panel.add(fileScroll, BorderLayout.CENTER);
         return panel;
+    }
+
+    /** 接收资源管理器拖入的文件/文件夹：拖入时高亮，松开后推送到当前目录。 */
+    private void installDropTarget() {
+        normalFileScrollBorder = fileScroll.getBorder();
+        DropTargetAdapter adapter = new DropTargetAdapter() {
+            @Override
+            public void dragEnter(DropTargetDragEvent dtde) {
+                if (dtde.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                    statusBeforeDrag = statusLabel.getText();
+                    normalFileScrollBorder = fileScroll.getBorder();
+                    dtde.acceptDrag(DnDConstants.ACTION_COPY);
+                    updateDropHighlight(true, targetPathAt(dtde.getLocation()));
+                } else {
+                    dtde.rejectDrag();
+                }
+            }
+
+            @Override
+            public void dragOver(DropTargetDragEvent dtde) {
+                if (dtde.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                    dtde.acceptDrag(DnDConstants.ACTION_COPY);
+                    updateDropHighlight(true, targetPathAt(dtde.getLocation()));
+                } else {
+                    dtde.rejectDrag();
+                }
+            }
+
+            @Override
+            public void dragExit(DropTargetEvent dte) {
+                updateDropHighlight(false, null);
+            }
+
+            @Override
+            public void drop(DropTargetDropEvent dtde) {
+                updateDropHighlight(false, null);
+                if (!dtde.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                    dtde.rejectDrop();
+                    showDropMessage(GuiStrings.get("dropUnsupported"), JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                dtde.acceptDrop(DnDConstants.ACTION_COPY);
+                Point point = dtde.getLocation();
+                List<File> files = new ArrayList<>();
+                try {
+                    Transferable transferable = dtde.getTransferable();
+                    Object data = transferable.getTransferData(DataFlavor.javaFileListFlavor);
+                    if (data instanceof List) {
+                        for (Object item : (List<?>) data) {
+                            if (item instanceof File) {
+                                files.add((File) item);
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    dtde.dropComplete(false);
+                    showDropMessage(GuiStrings.get("dropUnsupported"), JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                dtde.dropComplete(true);
+                handleDropFiles(files, targetPathAt(point));
+            }
+        };
+        new DropTarget(fileScroll, DnDConstants.ACTION_COPY, adapter, true);
+    }
+
+    /** 拖放时的目标目录：光标所在（或已选中）的手机目录，否则为当前目录。 */
+    private String targetPathAt(Point location) {
+        if (location != null && client != null) {
+            Point tablePoint = SwingUtilities.convertPoint(fileScroll, location, fileTable);
+            int row = fileTable.rowAtPoint(tablePoint);
+            if (row >= 0 && row < currentFiles.size() && currentFiles.get(row).isDirectory()) {
+                return currentFiles.get(row).getPath();
+            }
+        }
+        int[] rows = fileTable.getSelectedRows();
+        if (rows.length == 1 && rows[0] < currentFiles.size() && currentFiles.get(rows[0]).isDirectory()) {
+            return currentFiles.get(rows[0]).getPath();
+        }
+        return currentRemotePath;
+    }
+
+    private void updateDropHighlight(boolean active, String targetPath) {
+        if (active) {
+            fileScroll.setBorder(BorderFactory.createLineBorder(DROP_HIGHLIGHT, 2));
+            setStatus(client == null ? GuiStrings.get("dropNotConnected")
+                    : GuiStrings.get("dropHint", targetPath));
+        } else {
+            fileScroll.setBorder(normalFileScrollBorder);
+            setStatus(statusBeforeDrag != null ? statusBeforeDrag
+                    : (client == null ? GuiStrings.get("statusNotConnected")
+                    : GuiStrings.get("statusConnected", RpcProtocol.VERSION_RPC)));
+        }
+        fileScroll.repaint();
+    }
+
+    /** 拖入的路径校验与推送；未连接、忙或内容非法时给出明确提示。 */
+    private void handleDropFiles(List<File> files, String targetPath) {
+        if (client == null) {
+            showDropMessage(GuiStrings.get("dropNotConnected"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (transferActive) {
+            showDropMessage(GuiStrings.get("dropBusy"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (files == null || files.isEmpty()) {
+            showDropMessage(GuiStrings.get("dropEmpty"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        List<File> valid = new ArrayList<>();
+        List<String> invalid = new ArrayList<>();
+        for (File file : files) {
+            if (file != null && file.exists() && file.canRead()) {
+                valid.add(file);
+            } else if (file != null) {
+                invalid.add(file.getAbsolutePath());
+            }
+        }
+        if (!invalid.isEmpty()) {
+            log(GuiStrings.get("dropInvalid", invalid.size(), String.join(", ", invalid)), true);
+        }
+        if (valid.isEmpty()) {
+            showDropMessage(GuiStrings.get("dropEmpty"), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        log(GuiStrings.get("dropAccepted", valid.size(), targetPath));
+        pushLocalFiles(valid, targetPath);
+    }
+
+    private void showDropMessage(String message, int type) {
+        JOptionPane.showMessageDialog(this, message, GuiStrings.get("tabFiles"), type);
     }
 
     private JPanel buildTransferPanel() {
@@ -595,13 +784,20 @@ public class MainFrame extends JFrame {
         if (selected == null || selected.length == 0) {
             return;
         }
-        String targetPath = currentRemotePath;
-        int remoteFs = remoteFileSystem;
         List<File> files = new ArrayList<>();
         for (File file : selected) {
             files.add(file);
         }
-        enqueue(GuiStrings.get("pushTitle", files.size()), files.get(0).getAbsolutePath(), () -> {
+        pushLocalFiles(files, currentRemotePath);
+    }
+
+    /** 把本机文件/文件夹推送到目标目录；文件夹由传输层递归展开。 */
+    private void pushLocalFiles(List<File> files, String targetPath) {
+        if (files.isEmpty() || client == null) {
+            return;
+        }
+        int remoteFs = remoteFileSystem;
+        enqueue(GuiStrings.get("pushTitle", files.size()), targetPath, () -> {
             for (File file : files) {
                 List<RemoteFile> remoteFiles = new ArrayList<>();
                 remoteFiles.add(new RemoteFile(file));
