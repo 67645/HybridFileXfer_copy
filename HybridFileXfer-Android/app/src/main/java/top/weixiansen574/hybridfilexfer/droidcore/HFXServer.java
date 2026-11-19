@@ -1,5 +1,6 @@
 package top.weixiansen574.hybridfilexfer.droidcore;
 
+import android.os.Environment;
 import android.os.RemoteException;
 
 import java.io.IOException;
@@ -36,6 +37,7 @@ import top.weixiansen574.hybridfilexfer.core.rpc.RpcFileOps;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
+import top.weixiansen574.hybridfilexfer.core.rpc.TransferRequest;
 import top.weixiansen574.hybridfilexfer.droidcore.callback.StartServerCallback;
 import top.weixiansen574.nio.DataByteChannel;
 
@@ -349,7 +351,11 @@ public class HFXServer extends HFXService implements RpcFileOps {
         this.protocolVersion = RpcProtocol.VERSION_LEGACY;
     }
 
-    private void releaseBuffers() {
+    /**
+     * 释放原生缓冲区块。停止服务时会话线程与断开线程可能同时进入，
+     * 这里必须串行化，否则同一块内存会被重复 free 导致进程崩溃。
+     */
+    private synchronized void releaseBuffers() {
         for (ByteBuffer buffer : buffers) {
             NativeMemory.freeBuffer(buffer);
         }
@@ -405,7 +411,11 @@ public class HFXServer extends HFXService implements RpcFileOps {
     }
 
     public void sendFilesToRemote(List<RemoteFile> files, Directory localDir, Directory remoteDir, TransferFileCallback callback) throws IOException {
-        checkTransferSupported();
+        if (rpc != null) {
+            //301：推送迁移为帧请求
+            pushFilesFramed(rpc, files, localDir, remoteDir, callback);
+            return;
+        }
         ioLock.lock();
         try {
             ctChannel.writeShort(ControllerIdentifiers.REQUEST_RECEIVE);//请求对方接收
@@ -416,7 +426,11 @@ public class HFXServer extends HFXService implements RpcFileOps {
     }
 
     public void sendFilesToShelf(List<RemoteFile> files, Directory localDir, Directory remoteDir, TransferFileCallback callback) throws IOException {
-        checkTransferSupported();
+        if (rpc != null) {
+            //301：拉取迁移为帧请求
+            pullFilesFramed(rpc, files, localDir, remoteDir, callback);
+            return;
+        }
         ioLock.lock();
         try {
             ctChannel.writeShort(ControllerIdentifiers.REQUEST_SEND);
@@ -577,12 +591,6 @@ public class HFXServer extends HFXService implements RpcFileOps {
         }
     }
 
-    private void checkTransferSupported() throws IOException {
-        if (rpc != null) {
-            throw new IOException("协议 301 的传输任务将在后续阶段实现，请暂时使用 300 兼容模式连接");
-        }
-    }
-
     @Override
     protected WriteFileCall createWriteFileCall(LinkedBlockingDeque<ByteBuffer> buffers, int dequeCount) {
         return new DroidWriteFileCall(buffers, dequeCount, ioService);
@@ -608,6 +616,27 @@ public class HFXServer extends HFXService implements RpcFileOps {
     @Override
     public boolean rpcMkdir(String parent, String child) throws Exception {
         return ioService.appendAndMkdirs(parent, child);
+    }
+
+    @Override
+    public boolean rpcIsBusy() {
+        return transferBusy;
+    }
+
+    @Override
+    public String rpcReceiveFiles() throws Exception {
+        return receiveFilesFromPeer(SILENT_CALLBACK);
+    }
+
+    @Override
+    public String rpcSendFiles(TransferRequest request) throws Exception {
+        return sendFilesToPeer(request.files, request.localDir, request.remoteDir, SILENT_CALLBACK);
+    }
+
+    @Override
+    public byte[] rpcQueryInfo() throws Exception {
+        return RpcCodec.encodeQueryInfo(Directory.getCurrentFileSystem(),
+                Environment.getExternalStorageDirectory().getAbsolutePath());
     }
 
     @Override

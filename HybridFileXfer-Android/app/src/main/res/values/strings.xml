@@ -81,6 +81,8 @@
     <string name="chuang_jian_cheng_gong">Created successfully</string>
     <string name="chuang_jian_shi_bai">Failed to create</string>
     <string name="duan_kai_lian_jie">Disconnect</string>
+    <string name="she_zhi_duan_kou">Set port (default 5740)</string>
+    <string name="duan_kou_fan_wei_cuo_wu">Port must be an integer between 1 and 65535</string>
     <string name="duan_kai_lian_jie_deng_dai_zhong_xin_lian_jie">Disconnected (%1$s), waiting for a new connection</string>
     <string name="ben_she_bei_huan_chong_qu_kuai_shu">Local device buffer block count</string>
     <string name="dui_fang_huan_chong_qu_kuai_shu">Remote buffer block count</string>

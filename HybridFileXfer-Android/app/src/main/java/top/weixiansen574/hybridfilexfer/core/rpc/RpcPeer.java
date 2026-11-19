@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.nio.DataByteChannel;
 
 /**
@@ -74,7 +75,8 @@ public class RpcPeer {
         }
         RpcResult result;
         try {
-            result = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            //超时时间 <= 0 表示不超时（传输任务可能持续很久）
+            result = timeoutMs <= 0 ? future.get() : future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             pending.remove(seq);
             throw new IOException("RPC 超时：cmd=" + cmd, e);
@@ -138,6 +140,9 @@ public class RpcPeer {
                 }
                 if (cmd == RpcProtocol.CMD_RESPONSE) {
                     dispatchResponse(seq, payload);
+                } else if (cmd != RpcProtocol.CMD_SHUTDOWN && ops.rpcIsBusy()) {
+                    //传输任务进行中，立即回 ERR_BUSY。写帧仍通过写锁串行化，不会与业务写交错。
+                    writeBusy(seq);
                 } else {
                     final int requestSeq = seq;
                     final short requestCmd = cmd;
@@ -174,10 +179,33 @@ public class RpcPeer {
         future.complete(new RpcResult(status, body));
     }
 
+    private void writeBusy(int seq) {
+        try {
+            writeFrame(seq, RpcProtocol.CMD_RESPONSE, buildResponse(RpcProtocol.ERR_BUSY,
+                    RpcCodec.encodeMessage("传输任务进行中，请稍后重试")));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static byte[] buildResponse(byte status, byte[] body) {
+        byte[] data = body == null ? EMPTY : body;
+        byte[] response = new byte[data.length + 1];
+        response[0] = status;
+        System.arraycopy(data, 0, response, 1, data.length);
+        return response;
+    }
+
     private void dispatchRequest(int seq, short cmd, byte[] payload) {
         byte status;
         byte[] body;
         try {
+            //排队期间传输已经开始，则同样按 ERR_BUSY 处理
+            if (cmd != RpcProtocol.CMD_SHUTDOWN && cmd != RpcProtocol.CMD_QUERY_INFO && ops.rpcIsBusy()) {
+                body = RpcCodec.encodeMessage("传输任务进行中，请稍后重试");
+                status = RpcProtocol.ERR_BUSY;
+                writeFrame(seq, RpcProtocol.CMD_RESPONSE, buildResponse(status, body));
+                return;
+            }
             switch (cmd) {
                 case RpcProtocol.CMD_LIST_FILES:
                     body = RpcCodec.encodeFileList(ops.rpcListFiles(RpcCodec.decodePath(payload)));
@@ -193,6 +221,23 @@ public class RpcPeer {
                     status = RpcProtocol.OK;
                     break;
                 }
+                case RpcProtocol.CMD_RECEIVE_FILES: {
+                    String error = ops.rpcReceiveFiles();
+                    body = error == null ? EMPTY : RpcCodec.encodeMessage(error);
+                    status = error == null ? RpcProtocol.OK : RpcProtocol.ERR_IO;
+                    break;
+                }
+                case RpcProtocol.CMD_SEND_FILES: {
+                    TransferRequest request = RpcCodec.decodeTransferRequest(payload, Directory.getCurrentFileSystem());
+                    String error = ops.rpcSendFiles(request);
+                    body = error == null ? EMPTY : RpcCodec.encodeMessage(error);
+                    status = error == null ? RpcProtocol.OK : RpcProtocol.ERR_IO;
+                    break;
+                }
+                case RpcProtocol.CMD_QUERY_INFO:
+                    body = ops.rpcQueryInfo();
+                    status = RpcProtocol.OK;
+                    break;
                 case RpcProtocol.CMD_SHUTDOWN:
                     body = EMPTY;
                     status = RpcProtocol.OK;

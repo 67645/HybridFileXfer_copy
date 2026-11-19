@@ -17,11 +17,13 @@ import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
 import top.weixiansen574.hybridfilexfer.core.callback.ConnectServerCallback;
+import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcCodec;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcFileOps;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
+import top.weixiansen574.hybridfilexfer.core.rpc.TransferRequest;
 import top.weixiansen574.nio.DataByteChannel;
 
 public abstract class HFXClient extends HFXService implements RpcFileOps {
@@ -451,6 +453,27 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
         return RpcCodec.decodeBool(result.body);
     }
 
+    /** 301：把本地文件推给对端。 */
+    public void pushFiles(List<RemoteFile> files, Directory localDir, Directory remoteDir,
+                          TransferFileCallback callback) throws IOException {
+        requireRpc();
+        pushFilesFramed(rpc, files, localDir, remoteDir, callback);
+    }
+
+    /** 301：请求对端把文件发过来。 */
+    public void pullFiles(List<RemoteFile> files, Directory localDir, Directory remoteDir,
+                          TransferFileCallback callback) throws IOException {
+        requireRpc();
+        pullFilesFramed(rpc, files, localDir, remoteDir, callback);
+    }
+
+    /** 301：查询对端文件系统与主目录，返回 {文件系统类型, 主目录}。 */
+    public String[] queryInfo() throws IOException {
+        requireRpc();
+        RpcResult result = rpc.call(RpcProtocol.CMD_QUERY_INFO, null);
+        return RpcCodec.decodeQueryInfo(result.body);
+    }
+
     public RpcPeer getRpc() {
         return rpc;
     }
@@ -470,6 +493,27 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
     @Override
     public final boolean rpcMkdir(String parent, String child) throws Exception {
         return mkdir(parent, child);
+    }
+
+    @Override
+    public boolean rpcIsBusy() {
+        return transferBusy;
+    }
+
+    @Override
+    public String rpcReceiveFiles() throws Exception {
+        return receiveFilesFromPeer(callBack != null ? callBack : SILENT_CALLBACK);
+    }
+
+    @Override
+    public String rpcSendFiles(TransferRequest request) throws Exception {
+        return sendFilesToPeer(request.files, request.localDir, request.remoteDir,
+                callBack != null ? callBack : SILENT_CALLBACK);
+    }
+
+    @Override
+    public byte[] rpcQueryInfo() throws Exception {
+        return RpcCodec.encodeQueryInfo(Directory.getCurrentFileSystem(), homeDir);
     }
 
     @Override

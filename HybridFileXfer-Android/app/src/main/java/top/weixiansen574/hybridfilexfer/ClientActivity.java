@@ -104,7 +104,7 @@ public class ClientActivity extends AppCompatActivity implements ServiceConnecti
     public void onServiceConnected(ComponentName name, IBinder service) {
         iioService = IIOService.Stub.asInterface(service);
         progressDialog.setMessage(getString(R.string.connecting_server));
-        client = new DroidHFXClient(controllerIp, 5740, homeDir, iioService, context);
+        client = new DroidHFXClient(controllerIp, Config.getInstance(context).getServerPort(), homeDir, iioService, context);
         new ConnectServerTask(new ConnectServerTask.Callback() {
             @Override
             public void onConnectSuccess(List<String> channelNames) {

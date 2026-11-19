@@ -14,6 +14,10 @@ public final class RpcProtocol {
     public static final short CMD_MKDIR = 3;
     public static final short CMD_REQUEST_RECEIVE = 10;
     public static final short CMD_REQUEST_SEND = 11;
+    /** 301：请求方把本地文件推给对端，对端负责接收。 */
+    public static final short CMD_RECEIVE_FILES = CMD_REQUEST_RECEIVE;
+    /** 301：请求方要求对端把文件发过来，请求方负责接收。 */
+    public static final short CMD_SEND_FILES = CMD_REQUEST_SEND;
     public static final short CMD_QUERY_INFO = 100;
     public static final short CMD_CANCEL_JOB = 120;
 
@@ -29,6 +33,8 @@ public final class RpcProtocol {
 
     public static final int MAX_FRAME = 64 * 1024 * 1024;
     public static final long DEFAULT_TIMEOUT_MS = 30000L;
+    /** 传输任务的应答等待时间，0 表示不超时。 */
+    public static final long TRANSFER_TIMEOUT_MS = 0L;
 
     private RpcProtocol() {
     }

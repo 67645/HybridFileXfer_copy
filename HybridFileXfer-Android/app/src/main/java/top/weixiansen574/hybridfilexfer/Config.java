@@ -29,7 +29,11 @@ public class Config {
     }
 
     public int getServerPort() {
-        return 5740;
+        return preferences.getInt("server_port", 5740);
+    }
+
+    public void setServerPort(int port) {
+        preferences.edit().putInt("server_port", port).apply();
     }
 
     public int getLocalBufferCount() {

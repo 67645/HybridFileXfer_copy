@@ -16,6 +16,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.IBinder;
 import android.provider.Settings;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -249,6 +250,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 Toast.makeText(context, R.string.fu_wu_yi_ting_zhi, Toast.LENGTH_SHORT).show();
                 changeToStartState();
             }
+
+            @Override
+            public void onComplete() {
+                //会话循环正常退出（用户停止服务）时同样要恢复界面，异常退出走 onError
+                changeToStartState();
+            }
         };
         new StartServerTask(callback,server,config.getServerPort(), netCardsAdapter.getSelectedInterfaces(),
                 config.getLocalBufferCount(), config.getRemoteBufferCount()).execute();
@@ -381,11 +388,42 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             });
 
             dialog.show();
+        } else if (itemId == R.id.server_port) {
+            showPortDialog();
         } else if (itemId == R.id.client) {
             startClient();
         }
 
         return super.onOptionsItemSelected(item);
+    }
+
+    private void showPortDialog() {
+        EditText editPort = new EditText(context);
+        editPort.setInputType(InputType.TYPE_CLASS_NUMBER);
+        editPort.setText(String.valueOf(config.getServerPort()));
+        AlertDialog dialog = new AlertDialog.Builder(context)
+                .setTitle(R.string.she_zhi_duan_kou)
+                .setView(editPort)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.ok, null)
+                .create();
+        dialog.setOnShowListener(dialogInterface -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    int port;
+                    try {
+                        port = Integer.parseInt(editPort.getText().toString().trim());
+                    } catch (NumberFormatException e) {
+                        editPort.setError(getString(R.string.duan_kou_fan_wei_cuo_wu));
+                        return;
+                    }
+                    if (port < 1 || port > 65535) {
+                        editPort.setError(getString(R.string.duan_kou_fan_wei_cuo_wu));
+                        return;
+                    }
+                    config.setServerPort(port);
+                    dialog.dismiss();
+                }));
+        dialog.show();
     }
 
     private void startClient() {
@@ -488,6 +526,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     }
 
     private void changeToStartState() {
+        if (server == null) {
+            //已经回到起始状态，避免重复解绑
+            return;
+        }
         netCardsAdapter.setEnableModify(true);
         startServerBtn.setEnabled(true);
         startServerBtn.setText(R.string.qi_dong_fu_wu_qi_bing_deng_dai_lian_jie);

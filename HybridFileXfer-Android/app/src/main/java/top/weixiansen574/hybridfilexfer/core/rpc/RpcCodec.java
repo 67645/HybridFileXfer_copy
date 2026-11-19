@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 
 /**
@@ -89,6 +90,60 @@ public final class RpcCodec {
         }
         out.flush();
         return bos.toByteArray();
+    }
+
+    /**
+     * 传输请求载荷，与 300 的 REQUEST_SEND 对齐：
+     * int count + [UTF path]* + UTF 请求方目录 + int 请求方文件系统 + UTF 被请求方源目录。
+     */
+    public static byte[] encodeTransferRequest(TransferRequest request) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bos);
+        out.writeInt(request.files.size());
+        for (RemoteFile file : request.files) {
+            out.writeUTF(file.getPath());
+        }
+        out.writeUTF(request.localDir.path);
+        out.writeInt(request.localDir.fileSystem);
+        out.writeUTF(request.remoteDir.path);
+        out.flush();
+        return bos.toByteArray();
+    }
+
+    /**
+     * @param localFileSystem 解码方自身的文件系统类型，用于还原被请求方的源目录。
+     */
+    public static TransferRequest decodeTransferRequest(byte[] payload, int localFileSystem) throws IOException {
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
+        int count = in.readInt();
+        if (count < 0 || count > 1_000_000) {
+            throw new IOException("非法的文件数量：" + count);
+        }
+        List<RemoteFile> files = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            files.add(new RemoteFile(new java.io.File(in.readUTF())));
+        }
+        Directory remoteDir = new Directory(in.readUTF(), in.readInt());
+        Directory localDir = new Directory(in.readUTF(), localFileSystem);
+        return new TransferRequest(files, localDir, remoteDir);
+    }
+
+    /** QUERY_INFO 应答：int 文件系统类型 + UTF 主目录。 */
+    public static byte[] encodeQueryInfo(int fileSystem, String homeDir) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bos);
+        out.writeInt(fileSystem);
+        out.writeUTF(homeDir == null ? "/" : homeDir);
+        out.flush();
+        return bos.toByteArray();
+    }
+
+    /** @return {文件系统类型字符串, 主目录}，下标 0 为 int 字符串。 */
+    public static String[] decodeQueryInfo(byte[] body) throws IOException {
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(body));
+        int fileSystem = in.readInt();
+        String homeDir = in.readUTF();
+        return new String[]{String.valueOf(fileSystem), homeDir};
     }
 
     public static List<RemoteFile> decodeFileList(byte[] body) throws IOException {

@@ -24,6 +24,10 @@
                 android:icon="@drawable/baseline_grid_view_24"
                 android:title="@string/huan_chong_qu_she_zhi" />
             <item
+                android:id="@+id/server_port"
+                android:icon="@drawable/baseline_more_vert_24"
+                android:title="@string/she_zhi_duan_kou" />
+            <item
                 android:id="@+id/client"
                 android:icon="@drawable/baseline_phonelink_ring_24"
                 android:title="@string/lian_jie_shou_ji_fu_wu_duan" />

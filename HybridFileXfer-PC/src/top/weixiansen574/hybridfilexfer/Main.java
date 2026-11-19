@@ -5,6 +5,7 @@
 package top.weixiansen574.hybridfilexfer;
 
 import top.weixiansen574.hybridfilexfer.core.Utils;
+import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.bean.TrafficInfo;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
@@ -17,6 +18,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -225,6 +227,12 @@ public class Main {
             System.out.println("连接失败，已退出");
             return;
         }
+        String pushPath = paramMap.get("--push");
+        String pullPath = paramMap.get("--pull");
+        if (pushPath != null || pullPath != null) {
+            runTransfer(hfxClient, pushPath, pullPath, paramMap.get("--to"));
+            return;
+        }
         if (paramMap.containsKey("--list")) {
             String listPath = paramMap.get("--list");
             System.out.println("protocol=" + hfxClient.getProtocolVersion());
@@ -244,6 +252,73 @@ public class Main {
             return;
         }
         hfxClient.start(clientCallBack);
+    }
+
+    /** 301 模式下的推/拉验证入口：--push 本地路径 / --pull 手机路径，--to 指定目标目录。 */
+    private static void runTransfer(JdkHFXClient client, String pushPath, String pullPath, String toDir) {
+        if (client.getProtocolVersion() != 301) {
+            System.out.println("推/拉需要 301 协议，请使用 --protocol=301 或 --protocol=auto");
+            return;
+        }
+        try {
+            String[] info = client.queryInfo();
+            int remoteFileSystem = Integer.parseInt(info[0]);
+            String remoteHome = info[1];
+            if (pushPath != null) {
+                File source = new File(pushPath);
+                if (!source.exists()) {
+                    System.out.println("本地路径不存在：" + pushPath);
+                    return;
+                }
+                String remoteTarget = toDir == null || toDir.isEmpty() ? remoteHome : toDir;
+                Directory localDir = new Directory(source.getParent(), Directory.getCurrentFileSystem());
+                Directory remoteDir = new Directory(remoteTarget, remoteFileSystem);
+                System.out.println("推送 " + source.getAbsolutePath() + " -> " + remoteTarget);
+                client.pushFiles(Collections.singletonList(new RemoteFile(source)), localDir, remoteDir,
+                        clientCallBack);
+                System.out.println("推送完成");
+            } else {
+                String localTarget = toDir == null || toDir.isEmpty()
+                        ? new File(System.getProperty("user.home"), "HybridFileXfer").getAbsolutePath() : toDir;
+                File localDirFile = new File(localTarget);
+                if (!localDirFile.exists() && !localDirFile.mkdirs()) {
+                    System.out.println("无法创建接收目录：" + localTarget);
+                    return;
+                }
+                String parent = RemotePath.parent(pullPath);
+                List<RemoteFile> entries = client.requestListFiles(parent);
+                RemoteFile target = null;
+                if (entries != null) {
+                    for (RemoteFile entry : entries) {
+                        if (entry.getPath().equals(pullPath)) {
+                            target = entry;
+                            break;
+                        }
+                    }
+                }
+                if (target == null) {
+                    System.out.println("远端路径不存在或不可读：" + pullPath);
+                    return;
+                }
+                Directory localDir = new Directory(localDirFile.getAbsolutePath(), Directory.getCurrentFileSystem());
+                Directory remoteDir = new Directory(parent, remoteFileSystem);
+                System.out.println("拉取 " + pullPath + " -> " + localTarget);
+                client.pullFiles(Collections.singletonList(target), localDir, remoteDir, clientCallBack);
+                System.out.println("拉取完成");
+            }
+        } catch (Exception e) {
+            System.out.println("传输失败：" + e);
+        }
+    }
+
+    /** 远端路径的父目录（按 / 分隔）。 */
+    private static final class RemotePath {
+        static String parent(String path) {
+            String trimmed = path.endsWith("/") && path.length() > 1
+                    ? path.substring(0, path.length() - 1) : path;
+            int idx = trimmed.lastIndexOf('/');
+            return idx <= 0 ? "/" : trimmed.substring(0, idx);
+        }
     }
 
     /**
@@ -293,6 +368,9 @@ public class Main {
                     case "-v":
                     case "--protocol":
                     case "--list":
+                    case "--push":
+                    case "--pull":
+                    case "--to":
                         break;
                     default: // 非法参数处理
                         if (arg.startsWith("-")) {
