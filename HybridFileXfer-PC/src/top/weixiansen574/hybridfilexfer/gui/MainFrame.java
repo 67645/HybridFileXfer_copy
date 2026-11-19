@@ -1,14 +1,17 @@
 package top.weixiansen574.hybridfilexfer.gui;
 
 import top.weixiansen574.hybridfilexfer.core.Utils;
+import top.weixiansen574.hybridfilexfer.core.bean.Directory;
+import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.bean.TrafficInfo;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
 import top.weixiansen574.hybridfilexfer.core.callback.ConnectServerCallback;
 import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcException;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.jdkcore.JdkHFXClient;
 
 import javax.swing.BorderFactory;
-import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -20,26 +23,34 @@ import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
+import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
+import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingUtilities;
+import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
 import java.net.InetAddress;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-/** 阶段 3：Swing 骨架，连接面板 + 日志 + 被动传输进度。 */
+/** Swing 主界面：连接面板 + 手机文件浏览 + 传输队列 + 日志。 */
 public class MainFrame extends JFrame {
     private final JTextArea logArea = new JTextArea();
     private final JLabel statusLabel = new JLabel("未连接");
@@ -53,13 +64,49 @@ public class MainFrame extends JFrame {
     private final JTextField receiveDirField = new JTextField(24);
     private final JSpinner portSpinner = new JSpinner(new SpinnerNumberModel(GuiConfig.getPort(), 1, 65535, 1));
 
+    private final JTextField remotePathField = new JTextField();
+    private final JButton upButton = new JButton("上级目录");
+    private final JButton refreshFilesButton = new JButton("刷新");
+    private final JButton pullButton = new JButton("拉取到电脑");
+    private final JButton pushButton = new JButton("推送文件…");
+    private final DefaultTableModel fileModel = new DefaultTableModel(
+            new Object[]{"名称", "类型", "大小", "修改时间"}, 0) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final JTable fileTable = new JTable(fileModel);
+    private final List<RemoteFile> currentFiles = new ArrayList<>();
+
+    private final DefaultTableModel queueModel = new DefaultTableModel(
+            new Object[]{"操作", "路径", "状态"}, 0) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final JTable queueTable = new JTable(queueModel);
+    private final DefaultTableModel speedModel = new DefaultTableModel(
+            new Object[]{"通道", "速度"}, 0) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final JTable speedTable = new JTable(speedModel);
+
     private volatile JdkHFXClient client;
-    private Thread sessionThread;
+    private volatile boolean transferActive;
+    private ExecutorService transferExecutor;
+    private int remoteFileSystem = Directory.FILE_SYSTEM_UNIX;
+    private String remoteHome = "/";
+    private String currentRemotePath = "/";
 
     public MainFrame() {
         super("多轨快传 - HybridFileXfer");
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
-        setMinimumSize(new Dimension(760, 520));
+        setMinimumSize(new Dimension(980, 680));
         setLayout(new BorderLayout(8, 8));
         ((JPanel) getContentPane()).setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
@@ -70,6 +117,7 @@ public class MainFrame extends JFrame {
         disconnectButton.setEnabled(false);
         progressBar.setStringPainted(true);
         progressBar.setString("空闲");
+        setBrowsingEnabled(false);
         log("端口：" + GuiConfig.getPort() + "，接收目录：" + GuiConfig.getReceiveDir());
 
         refreshButton.addActionListener(e -> refreshDevices());
@@ -77,6 +125,24 @@ public class MainFrame extends JFrame {
         connectLanButton.addActionListener(e -> connectViaLan());
         disconnectButton.addActionListener(e -> disconnect());
         portSpinner.addChangeListener(e -> GuiConfig.setPort((Integer) portSpinner.getValue()));
+        upButton.addActionListener(e -> navigateUp());
+        refreshFilesButton.addActionListener(e -> refreshRemoteFiles());
+        pullButton.addActionListener(e -> pullSelected());
+        pushButton.addActionListener(e -> pushFiles());
+        fileTable.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2 && client != null) {
+                    int row = fileTable.getSelectedRow();
+                    if (row >= 0 && row < currentFiles.size()) {
+                        RemoteFile file = currentFiles.get(row);
+                        if (file.isDirectory()) {
+                            navigateTo(file.getPath());
+                        }
+                    }
+                }
+            }
+        });
 
         addWindowListener(new WindowAdapter() {
             @Override
@@ -158,13 +224,52 @@ public class MainFrame extends JFrame {
         return panel;
     }
 
-    private JPanel buildCenterPanel() {
+    private JSplitPane buildCenterPanel() {
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        JScrollPane scrollPane = new JScrollPane(logArea);
-        scrollPane.setBorder(BorderFactory.createTitledBorder("日志"));
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.add(scrollPane, BorderLayout.CENTER);
+        JScrollPane logScroll = new JScrollPane(logArea);
+        logScroll.setBorder(BorderFactory.createTitledBorder("日志"));
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("手机文件", buildFilePanel());
+        tabs.addTab("传输", buildTransferPanel());
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tabs, logScroll);
+        splitPane.setResizeWeight(0.62);
+        return splitPane;
+    }
+
+    private JPanel buildFilePanel() {
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        JPanel toolbar = new JPanel(new BorderLayout(4, 4));
+        remotePathField.setEditable(false);
+        remotePathField.setText("/");
+        toolbar.add(remotePathField, BorderLayout.CENTER);
+
+        JPanel buttons = new JPanel();
+        buttons.add(upButton);
+        buttons.add(refreshFilesButton);
+        buttons.add(pullButton);
+        buttons.add(pushButton);
+        toolbar.add(buttons, BorderLayout.EAST);
+        panel.add(toolbar, BorderLayout.NORTH);
+
+        fileTable.setRowHeight(22);
+        fileTable.getColumnModel().getColumn(0).setPreferredWidth(340);
+        fileTable.getColumnModel().getColumn(1).setPreferredWidth(60);
+        fileTable.getColumnModel().getColumn(2).setPreferredWidth(100);
+        fileTable.getColumnModel().getColumn(3).setPreferredWidth(150);
+        panel.add(new JScrollPane(fileTable), BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JPanel buildTransferPanel() {
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        panel.add(new JScrollPane(queueTable), BorderLayout.CENTER);
+        JScrollPane speedScroll = new JScrollPane(speedTable);
+        speedScroll.setPreferredSize(new Dimension(240, 120));
+        speedScroll.setBorder(BorderFactory.createTitledBorder("通道速度"));
+        panel.add(speedScroll, BorderLayout.SOUTH);
         return panel;
     }
 
@@ -272,7 +377,7 @@ public class MainFrame extends JFrame {
         String receiveDir = receiveDirField.getText().trim();
         setConnectingState(true);
         setStatus("连接中…");
-        sessionThread = new Thread(() -> {
+        new Thread(() -> {
             try {
                 if (adbSerial != null) {
                     String adb = AdbUtil.findAdb();
@@ -294,10 +399,27 @@ public class MainFrame extends JFrame {
                     return;
                 }
                 client = newClient;
+                String[] info = null;
+                if (newClient.getProtocolVersion() == RpcProtocol.VERSION_RPC) {
+                    try {
+                        info = newClient.queryInfo();
+                        remoteFileSystem = Integer.parseInt(info[0]);
+                        remoteHome = info[1];
+                    } catch (Exception e) {
+                        uiLog("查询手机主目录失败：" + e.getMessage(), true);
+                    }
+                }
+                final String initialPath = remoteHome;
                 uiLater(() -> {
                     setConnectingState(false);
                     disconnectButton.setEnabled(true);
+                    setBrowsingEnabled(newClient.getProtocolVersion() == RpcProtocol.VERSION_RPC);
                     setStatus("已连接（协议 " + newClient.getProtocolVersion() + "）");
+                    if (newClient.getProtocolVersion() != RpcProtocol.VERSION_RPC) {
+                        log("当前为 300 兼容模式，手机文件浏览与主动推拉需要 301 协议", true);
+                    } else if (initialPath != null) {
+                        navigateTo(initialPath);
+                    }
                 });
                 // start() 会一直阻塞到会话结束，被动传输也在其中处理
                 newClient.start(new GuiTransferCallback());
@@ -308,14 +430,16 @@ public class MainFrame extends JFrame {
                 uiLater(() -> {
                     setConnectingState(false);
                     disconnectButton.setEnabled(false);
+                    setBrowsingEnabled(false);
+                    fileModel.setRowCount(0);
+                    speedModel.setRowCount(0);
+                    currentFiles.clear();
                     progressBar.setValue(0);
                     progressBar.setString("空闲");
                     setStatus("未连接");
                 });
             }
-        }, "HFX-GuiSession");
-        sessionThread.setDaemon(true);
-        sessionThread.start();
+        }, "HFX-GuiSession").start();
     }
 
     private void disconnect() {
@@ -349,6 +473,178 @@ public class MainFrame extends JFrame {
         deviceBox.setEnabled(!connecting);
         portSpinner.setEnabled(!connecting);
         receiveDirField.setEnabled(!connecting);
+    }
+
+    private void setBrowsingEnabled(boolean enabled) {
+        upButton.setEnabled(enabled);
+        refreshFilesButton.setEnabled(enabled);
+        pullButton.setEnabled(enabled);
+        pushButton.setEnabled(enabled);
+        fileTable.setEnabled(enabled);
+    }
+
+    private void navigateUp() {
+        if (currentRemotePath.isEmpty() || "/".equals(currentRemotePath)) {
+            return;
+        }
+        String path = currentRemotePath;
+        if (path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        int index = path.lastIndexOf('/');
+        navigateTo(index <= 0 ? "/" : path.substring(0, index));
+    }
+
+    private void navigateTo(String path) {
+        if (client == null) {
+            return;
+        }
+        setBrowsingEnabled(false);
+        new Thread(() -> {
+            try {
+                List<RemoteFile> files = client.requestListFiles(path);
+                uiLater(() -> {
+                    currentRemotePath = path;
+                    remotePathField.setText(path);
+                    fileModel.setRowCount(0);
+                    currentFiles.clear();
+                    if (files == null) {
+                        log("目录不可读：" + path, true);
+                    } else {
+                        currentFiles.addAll(files);
+                        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                        for (RemoteFile file : files) {
+                            String modified = file.lastModified() > 0
+                                    ? format.format(new Date(file.lastModified())) : "";
+                            fileModel.addRow(new Object[]{
+                                    file.getName(),
+                                    file.isDirectory() ? "目录" : "文件",
+                                    file.isDirectory() ? "" : Utils.formatFileSize(file.getSize()),
+                                    modified
+                            });
+                        }
+                    }
+                    setBrowsingEnabled(!transferActive && client != null);
+                });
+            } catch (RpcException e) {
+                uiLater(() -> {
+                    log("读取目录失败（status=" + e.status + "）：" + e.getMessage(), true);
+                    if (e.status == RpcProtocol.ERR_BUSY) {
+                        log("手机端正在传输，稍后再试", true);
+                    }
+                    setBrowsingEnabled(!transferActive && client != null);
+                });
+            } catch (Exception e) {
+                uiLater(() -> {
+                    log("读取目录失败：" + e, true);
+                    setBrowsingEnabled(!transferActive && client != null);
+                });
+            }
+        }, "HFX-Browse").start();
+    }
+
+    private void refreshRemoteFiles() {
+        navigateTo(currentRemotePath);
+    }
+
+    private void pullSelected() {
+        int[] rows = fileTable.getSelectedRows();
+        if (rows.length == 0) {
+            JOptionPane.showMessageDialog(this, "请先选择要拉取的文件或目录", "提示", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        List<RemoteFile> files = new ArrayList<>();
+        for (int row : rows) {
+            if (row >= 0 && row < currentFiles.size()) {
+                files.add(currentFiles.get(row));
+            }
+        }
+        applyReceiveDirQuietly();
+        String receiveDir = receiveDirField.getText().trim();
+        File localDir = new File(receiveDir);
+        if (!localDir.exists() && !localDir.mkdirs()) {
+            JOptionPane.showMessageDialog(this, "接收目录不可用：" + receiveDir, "提示", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        String sourceDirPath = currentRemotePath;
+        int remoteFs = remoteFileSystem;
+        Directory local = new Directory(localDir.getAbsolutePath(), Directory.getCurrentFileSystem());
+        Directory remote = new Directory(sourceDirPath, remoteFs);
+        enqueue("拉取 " + files.size() + " 项", files.get(0).getPath(), () -> {
+            client.pullFiles(files, local, remote, new GuiTransferCallback());
+            return true;
+        });
+    }
+
+    private void pushFiles() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setMultiSelectionEnabled(true);
+        chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        File[] selected = chooser.getSelectedFiles();
+        if (selected == null || selected.length == 0) {
+            return;
+        }
+        String targetPath = currentRemotePath;
+        int remoteFs = remoteFileSystem;
+        List<File> files = new ArrayList<>();
+        for (File file : selected) {
+            files.add(file);
+        }
+        enqueue("推送 " + files.size() + " 项", files.get(0).getAbsolutePath(), () -> {
+            for (File file : files) {
+                List<RemoteFile> remoteFiles = new ArrayList<>();
+                remoteFiles.add(new RemoteFile(file));
+                Directory local = new Directory(file.getParent(), Directory.getCurrentFileSystem());
+                Directory remote = new Directory(targetPath, remoteFs);
+                client.pushFiles(remoteFiles, local, remote, new GuiTransferCallback());
+            }
+            return true;
+        });
+    }
+
+    private interface TransferJob {
+        boolean run() throws Exception;
+    }
+
+    private void enqueue(String operation, String path, TransferJob job) {
+        if (client == null) {
+            return;
+        }
+        queueModel.addRow(new Object[]{operation, path, "排队中"});
+        int row = queueModel.getRowCount() - 1;
+        if (transferExecutor == null) {
+            transferExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread thread = new Thread(r, "HFX-GuiTransfer");
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
+        transferExecutor.execute(() -> {
+            transferActive = true;
+            uiLater(() -> {
+                queueModel.setValueAt("进行中", row, 2);
+                setBrowsingEnabled(false);
+            });
+            boolean ok;
+            try {
+                ok = job.run();
+            } catch (Exception e) {
+                ok = false;
+                uiLog("传输失败：" + e, true);
+            }
+            boolean finalOk = ok;
+            uiLater(() -> {
+                queueModel.setValueAt(finalOk ? "完成" : "失败", row, 2);
+                transferActive = false;
+                if (client != null) {
+                    setBrowsingEnabled(true);
+                    navigateTo(currentRemotePath);
+                }
+            });
+        });
     }
 
     private void uiLog(String message) {
@@ -454,7 +750,14 @@ public class MainFrame extends JFrame {
                 total += info.uploadTraffic + info.downloadTraffic;
             }
             final long speed = total;
-            uiLater(() -> setStatus("传输中 " + Utils.formatSpeed(speed)));
+            uiLater(() -> {
+                setStatus("传输中 " + Utils.formatSpeed(speed));
+                speedModel.setRowCount(0);
+                for (TrafficInfo info : trafficInfoList) {
+                    speedModel.addRow(new Object[]{info.iName,
+                            Utils.formatSpeed(info.uploadTraffic + info.downloadTraffic)});
+                }
+            });
         }
 
         @Override
