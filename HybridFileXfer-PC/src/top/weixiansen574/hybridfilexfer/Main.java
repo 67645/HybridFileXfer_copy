@@ -18,6 +18,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -151,6 +152,12 @@ public class Main {
 
     /**主函数*/
     public static void main(String[] args) throws Exception {
+        // 无参数或 --gui：启动图形界面
+        if (args.length == 0 || Arrays.asList(args).contains("--gui")) {
+            top.weixiansen574.hybridfilexfer.gui.MainFrame.showWindow();
+            return;
+        }
+
         Map<String, String> paramMap = new HashMap<>();
         parseArguments(paramMap, args);
 

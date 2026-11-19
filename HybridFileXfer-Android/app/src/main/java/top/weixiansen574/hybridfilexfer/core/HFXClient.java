@@ -426,6 +426,36 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
         buffers.clear();
     }
 
+    /** 主动断开当前连接（供 GUI 使用），关闭控制通道与全部传输通道。 */
+    public void disconnect() {
+        isRun = false;
+        if (rpc != null) {
+            try {
+                rpc.call(RpcProtocol.CMD_SHUTDOWN, null, 2000L);
+            } catch (IOException ignored) {
+            }
+            rpc.close();
+            rpc = null;
+        }
+        if (connections != null) {
+            for (TransferConnection connection : connections) {
+                try {
+                    connection.close();
+                } catch (IOException ignored) {
+                }
+            }
+            connections.clear();
+        }
+        if (ctChannel != null) {
+            try {
+                ctChannel.close();
+            } catch (IOException ignored) {
+            }
+            ctChannel = null;
+        }
+        freeBuffers();
+    }
+
     // ---------------- 301 双向帧：客户端主动请求 ----------------
 
     private void requireRpc() throws IOException {
