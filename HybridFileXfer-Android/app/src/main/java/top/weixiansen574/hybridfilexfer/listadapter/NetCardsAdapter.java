@@ -211,15 +211,13 @@ public class NetCardsAdapter extends RecyclerView.Adapter<NetCardsAdapter.ViewHo
             Enumeration<InetAddress> inetAddresses = networkInterface.getInetAddresses();
             while (inetAddresses.hasMoreElements()) {
                 InetAddress address = inetAddresses.nextElement();
-                if (!address.isLoopbackAddress() && address instanceof Inet4Address
-                        && !networkInterface.getDisplayName().startsWith("rmnet_data"/*数据流量除外*/)) {
+                if (!address.isLoopbackAddress() && address instanceof Inet4Address) {
                     ItemServerNetInterface item = new ItemServerNetInterface(networkInterface.getDisplayName(), address, context.getString(R.string.not_run));
-                    //VPN开的虚拟网卡，默认不勾选
-                    if (item.name.startsWith("tun")) {
+                    //VPN 开的虚拟网卡、以及移动数据（rmnet*）默认不勾选，用户仍可在界面上手动勾选
+                    if (item.name.startsWith("tun") || item.name.startsWith("rmnet")) {
                         item.enable = false;
                     }
                     netInterfaceList.add(item);
-                    System.out.println(networkInterface.getDisplayName() + "  " + address);
                 }
             }
         }
