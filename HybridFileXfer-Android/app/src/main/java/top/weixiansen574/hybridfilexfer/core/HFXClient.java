@@ -11,8 +11,12 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
+import top.weixiansen574.hybridfilexfer.core.auth.PcAuthException;
+import top.weixiansen574.hybridfilexfer.core.auth.PcIdentity;
+import top.weixiansen574.hybridfilexfer.core.security.PathGuard;
 import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
@@ -38,11 +42,21 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
     protected ClientCallBack callBack;
     private int preferredVersion = RpcProtocol.VERSION_LEGACY;
     private int remoteVersion = -1;
+    private final PcIdentity identity = PcIdentity.get();
+    private String lastConnectError;
+    /** 本端允许远端读写的根目录；默认就是接收目录/主目录。 */
+    protected final PathGuard pathGuard;
 
     public HFXClient(String serverControllerAddress, int serverPort,String homeDir) {
         this.serverControllerAddress = serverControllerAddress;
         this.serverPort = serverPort;
         this.homeDir = homeDir;
+        String root = homeDir == null || homeDir.trim().isEmpty() ? "/" : homeDir;
+        this.pathGuard = new PathGuard(Collections.singletonList(new File(root)), false);
+    }
+
+    public PathGuard getPathGuard() {
+        return pathGuard;
     }
 
     /** 指定首选协议版本（300 或 301）。 */
@@ -55,6 +69,11 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
 
     public int getRemoteProtocolVersion() {
         return remoteVersion;
+    }
+
+    /** 最近一次连接失败的可读原因（授权拒绝、协议不匹配等），未失败时为 null。 */
+    public String getLastConnectError() {
+        return lastConnectError;
     }
 
     /**
@@ -84,6 +103,7 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
     }
 
     private boolean connectWithVersion(int version, ConnectServerCallback callback) throws IOException {
+        lastConnectError = null;
         try {
             //System.out.println("正在连接控制通道：" + serverControllerAddress);
             callback.onConnectingControlChannel(serverControllerAddress, serverPort);
@@ -98,6 +118,30 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
                 ctChannel.close();
                 return false;
             }
+            remoteVersion = version;
+            if (version == RpcProtocol.VERSION_RPC) {
+                // 301：在网卡与缓冲协商之前完成电脑身份交换与授权
+                ctChannel.writeInt(RpcProtocol.AUTH_MAGIC);
+                ctChannel.writeUTF(identity.getId());
+                ctChannel.writeUTF(identity.getName());
+                int magic = ctChannel.readInt();
+                if (magic != RpcProtocol.AUTH_RESP_MAGIC) {
+                    throw new IOException("授权握手失败：对端不是兼容的 301 服务端，请同时升级手机端");
+                }
+                byte authStatus = ctChannel.readByte();
+                String reason = ctChannel.readUTF();
+                if (authStatus != RpcProtocol.AUTH_OK) {
+                    throw new PcAuthException(reason == null || reason.isEmpty()
+                            ? "手机端拒绝了这台电脑的连接" : reason);
+                }
+            }
+        } catch (PcAuthException e) {
+            lastConnectError = e.getMessage();
+            try {
+                ctChannel.close();
+            } catch (IOException ignored) {
+            }
+            return false;
         } catch (IOException e) {
             //System.out.println("控制通道连接到手机失败，请检查手机的服务端是否启动？");
             callback.onConnectControlFailed();
@@ -512,16 +556,19 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
 
     @Override
     public final List<RemoteFile> rpcListFiles(String path) throws Exception {
+        pathGuard.checkReadable(path);
         return listFiles(path);
     }
 
     @Override
     public final boolean rpcDeleteFile(String path) throws Exception {
+        pathGuard.checkDelete(path);
         return deleteLocalFile(path);
     }
 
     @Override
     public final boolean rpcMkdir(String parent, String child) throws Exception {
+        pathGuard.checkWritable(new File(parent, child).getPath());
         return mkdir(parent, child);
     }
 
@@ -537,6 +584,9 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
 
     @Override
     public String rpcSendFiles(TransferRequest request) throws Exception {
+        for (RemoteFile file : request.files) {
+            pathGuard.checkReadable(file.getPath());
+        }
         return sendFilesToPeer(request.files, request.localDir, request.remoteDir,
                 callBack != null ? callBack : SILENT_CALLBACK);
     }
@@ -550,7 +600,7 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
     public void rpcOnPeerClosed(String reason) {
         isRun = false;
         if (callBack != null) {
-            callBack.onExit();
+            callBack.onPeerClosed(reason);
         }
     }
 

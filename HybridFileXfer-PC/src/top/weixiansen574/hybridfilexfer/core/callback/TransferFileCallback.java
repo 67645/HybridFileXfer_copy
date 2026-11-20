@@ -9,6 +9,11 @@ public interface TransferFileCallback {
     int ERROR_TYPE_INTERRUPT = 2;
     int ERROR_TYPE_READ_ERROR = 3;
     int ERROR_TYPE_WRITE_ERROR = 4;
+    int ERROR_CODE_PERMISSION = 1;
+    int ERROR_CODE_PATH = 2;
+    int ERROR_CODE_NO_SPACE = 3;
+    int ERROR_CODE_DISCONNECTED = 4;
+    int ERROR_CODE_IO = 5;
 
     void onFileUploading(String iName, String path, long targetSize, long totalSize);
 
@@ -28,5 +33,10 @@ public interface TransferFileCallback {
 
     //传输通道有其中一个断开时
     void onIncomplete();
+
+    /** 带错误码的传输失败；默认退回 onIncomplete，保持旧实现兼容。 */
+    default void onTransferFailed(int code, String message) {
+        onIncomplete();
+    }
 
 }

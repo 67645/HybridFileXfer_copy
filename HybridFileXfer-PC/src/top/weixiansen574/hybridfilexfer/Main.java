@@ -231,7 +231,9 @@ public class Main {
             connected = hfxClient.connect(connectServerCallback);
         }
         if (!connected) {
-            System.out.println("连接失败，已退出");
+            String reason = hfxClient.getLastConnectError();
+            System.out.println(reason == null || reason.isEmpty()
+                    ? "连接失败，已退出" : "连接失败：" + reason);
             return;
         }
         String pushPath = paramMap.get("--push");

@@ -23,7 +23,9 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.Toast;
 
@@ -38,13 +40,19 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.io.IOException;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import rikka.shizuku.Shizuku;
 import top.weixiansen574.async.BackstageTask;
 import top.weixiansen574.hybridfilexfer.aidl.IIOService;
 import top.weixiansen574.hybridfilexfer.core.bean.ServerNetInterface;
 import top.weixiansen574.hybridfilexfer.droidcore.HFXServer;
+import top.weixiansen574.hybridfilexfer.droidcore.PcAuthPrompter;
 import top.weixiansen574.hybridfilexfer.droidcore.StartServerTask;
 import top.weixiansen574.hybridfilexfer.droidcore.callback.StartServerCallback;
 import top.weixiansen574.hybridfilexfer.listadapter.NetCardsAdapter;
@@ -61,6 +69,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private boolean isShizuku = false;
     private HFXServer server;
     private Config config;
+    private volatile boolean activityAlive = true;
+    private volatile CountDownLatch authLatch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -181,6 +191,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     public void onServiceConnected(ComponentName name, IBinder service) {
         IIOService iioService = IIOService.Stub.asInterface(service);
         server = new HFXServer(iioService, config);
+        server.setAuthPrompter(this::requestPcAuthFromUi);
         StartServerCallback callback = new StartServerCallback() {
             @Override
             public void onBindFailed(int port) {
@@ -230,6 +241,13 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 HFXServer.instance = server;
                 //TODO 国际化
                 startServerBtn.setText(R.string.duan_kai_lian_jie);
+            }
+
+            @Override
+            public void onAuthDenied(String pcName, String reason) {
+                runOnUiThread(() -> Toast.makeText(context,
+                        getString(R.string.auth_denied_toast, pcName, reason),
+                        Toast.LENGTH_LONG).show());
             }
 
             @Override
@@ -316,6 +334,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         MenuItem item = menu.findItem(R.id.allow_pc_access);
         if (item != null) {
             item.setChecked(config.isAllowPcAccess());
+        }
+        MenuItem allowAll = menu.findItem(R.id.allow_all_paths);
+        if (allowAll != null) {
+            allowAll.setChecked(config.isAllowAllPaths());
         }
         return super.onPrepareOptionsMenu(menu);
     }
@@ -408,11 +430,110 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                             : R.string.yi_jin_zhi_dian_nao_zhu_dong_fang_wen),
                     Toast.LENGTH_SHORT).show();
             return true;
+        } else if (itemId == R.id.authorized_pcs) {
+            showAuthorizedPcs();
+            return true;
+        } else if (itemId == R.id.allow_all_paths) {
+            boolean allow = !config.isAllowAllPaths();
+            config.setAllowAllPaths(allow);
+            item.setChecked(allow);
+            Toast.makeText(context,
+                    getString(allow ? R.string.allow_all_paths_on : R.string.allow_all_paths_off),
+                    Toast.LENGTH_SHORT).show();
+            return true;
         } else if (itemId == R.id.client) {
             startClient();
         }
 
         return super.onOptionsItemSelected(item);
+    }
+
+    /** 首次遇到某台电脑时由服务端线程调用，阻塞等待用户选择。 */
+    private PcAuthPrompter.Decision requestPcAuthFromUi(String pcId, String pcName) {
+        if (!activityAlive || isFinishing()) {
+            return PcAuthPrompter.Decision.deny();
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        authLatch = latch;
+        final PcAuthPrompter.Decision[] result = {PcAuthPrompter.Decision.deny()};
+        runOnUiThread(() -> {
+            if (!activityAlive || isFinishing()) {
+                latch.countDown();
+                return;
+            }
+            CheckBox remember = new CheckBox(this);
+            remember.setText(R.string.remember_pc);
+            remember.setChecked(true);
+            int padding = (int) (20 * getResources().getDisplayMetrics().density);
+            LinearLayout container = new LinearLayout(this);
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.setPadding(padding, padding / 2, padding, 0);
+            container.addView(remember);
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.pc_auth_title)
+                    .setMessage(getString(R.string.pc_auth_message, pcName, pcId))
+                    .setView(container)
+                    .setPositiveButton(R.string.pc_auth_allow, (dialog, which) -> {
+                        result[0] = new PcAuthPrompter.Decision(true, remember.isChecked());
+                        latch.countDown();
+                    })
+                    .setNegativeButton(R.string.pc_auth_deny, (dialog, which) -> {
+                        result[0] = new PcAuthPrompter.Decision(false, remember.isChecked());
+                        latch.countDown();
+                    })
+                    .setOnCancelListener(dialog -> {
+                        result[0] = PcAuthPrompter.Decision.deny();
+                        latch.countDown();
+                    })
+                    .create()
+                    .show();
+        });
+        try {
+            latch.await(60, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        authLatch = null;
+        return result[0];
+    }
+
+    /** 设置页：查看并撤销已授权的电脑。 */
+    private void showAuthorizedPcs() {
+        List<PcAuthEntry> entries = config.listPcAuth();
+        if (entries.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.pc_auth_manage_title)
+                    .setMessage(R.string.pc_auth_empty)
+                    .setPositiveButton(R.string.ok, null)
+                    .show();
+            return;
+        }
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
+        String[] labels = new String[entries.size()];
+        for (int i = 0; i < entries.size(); i++) {
+            PcAuthEntry entry = entries.get(i);
+            String time = entry.lastTime <= 0 ? "-" : format.format(new Date(entry.lastTime));
+            labels[i] = getString(entry.status == Config.PC_AUTH_DENY
+                    ? R.string.pc_denied_item : R.string.pc_authorized_item,
+                    entry.name, entry.id, time);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.pc_auth_manage_title)
+                .setItems(labels, (dialog, which) -> confirmRevokePc(entries.get(which)))
+                .setNegativeButton(R.string.close, null)
+                .show();
+    }
+
+    private void confirmRevokePc(PcAuthEntry entry) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.pc_auth_revoke_title)
+                .setMessage(getString(R.string.pc_auth_revoke_message, entry.name))
+                .setPositiveButton(R.string.ok, (dialog, which) -> {
+                    config.removePc(entry.id);
+                    Toast.makeText(context, R.string.pc_auth_revoked, Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton(R.string.cancel, null)
+                .show();
     }
 
     private void showPortDialog() {
@@ -595,6 +716,11 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
 
     @Override
     protected void onDestroy() {
+        activityAlive = false;
+        CountDownLatch latch = authLatch;
+        if (latch != null) {
+            latch.countDown();
+        }
         if (HFXServer.instance != null) {
             HFXServer.instance.disconnect(new BackstageTask.BaseEventHandler() {
             });

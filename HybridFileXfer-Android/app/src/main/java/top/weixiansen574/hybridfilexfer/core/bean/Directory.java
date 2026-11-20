@@ -105,6 +105,14 @@ public class Directory {
      * @return 生成的远程文件绝对路径
      */
     public String generateTransferPath(String file, Directory remote) {
+        return generateTransferPath(file, remote, null);
+    }
+
+    /**
+     * @param transferName 覆盖确认时用户指定的新名称；仅作用于当前文件/目录本身，
+     *                     不改变递归子项的路径。null 表示沿用原名。
+     */
+    public String generateTransferPath(String file, Directory remote, String transferName) {
         // 根据本地系统类型确定分隔符
         String localSep = (this.fileSystem == FILE_SYSTEM_UNIX) ? "/" : "\\";
         String remoteSep = (remote.fileSystem == FILE_SYSTEM_UNIX) ? "/" : "\\";
@@ -146,9 +154,13 @@ public class Directory {
         // 组合远程文件夹与经过非法字符替换后的相对路径，注意 remote.path 已规范化（结尾包含分隔符）
         if (sanitizedRelative.isEmpty()) {
             return remote.path;
-        } else {
-            return remote.path + sanitizedRelative;
         }
+        if (transferName != null && !transferName.trim().isEmpty()) {
+            String newName = transferName.trim().replaceAll("[\\\\:*?\"<>|]", "_");
+            int idx = sanitizedRelative.lastIndexOf(remoteSep);
+            sanitizedRelative = (idx >= 0 ? sanitizedRelative.substring(0, idx + 1) : "") + newName;
+        }
+        return remote.path + sanitizedRelative;
     }
 
     public static int getCurrentFileSystem(){

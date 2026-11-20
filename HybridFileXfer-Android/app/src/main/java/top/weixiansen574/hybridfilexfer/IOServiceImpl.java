@@ -1,6 +1,8 @@
 package top.weixiansen574.hybridfilexfer;
 
 import android.os.ParcelFileDescriptor;
+import android.system.Os;
+import android.system.OsConstants;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -96,6 +98,11 @@ public class IOServiceImpl extends IIOService.Stub {
             return false;
         }
 
+        // 符号链接只删除链接本身，不能跟随进入目标目录
+        if (isSymlink(file)) {
+            return file.delete();
+        }
+
         // 如果是目录，递归删除
         if (file.isDirectory()) {
             File[] files = file.listFiles();
@@ -108,6 +115,14 @@ public class IOServiceImpl extends IIOService.Stub {
 
         // 删除文件或空目录
         return file.delete();
+    }
+
+    private static boolean isSymlink(File file) {
+        try {
+            return OsConstants.S_ISLNK(Os.lstat(file.getAbsolutePath()).st_mode);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public boolean appendAndMkdirs(String parent, String child){

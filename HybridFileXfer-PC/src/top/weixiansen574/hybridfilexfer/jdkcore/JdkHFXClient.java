@@ -6,6 +6,7 @@ import top.weixiansen574.hybridfilexfer.core.Utils;
 import top.weixiansen574.hybridfilexfer.core.WriteFileCall;
 import top.weixiansen574.hybridfilexfer.core.bean.Directory;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -62,7 +63,9 @@ public class JdkHFXClient extends HFXClient {
 
     @Override
     protected WriteFileCall createWriteFileCall(LinkedBlockingDeque<ByteBuffer> buffers, int dequeCount) {
-        return new JdkWriteFileCall(buffers,dequeCount);
+        // 300 保持原有行为；301 才应用根目录约束
+        return new JdkWriteFileCall(buffers, dequeCount,
+                protocolVersion == RpcProtocol.VERSION_RPC ? pathGuard : null);
     }
 
     @Override

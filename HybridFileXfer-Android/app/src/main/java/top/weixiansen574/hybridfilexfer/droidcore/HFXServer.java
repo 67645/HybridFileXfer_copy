@@ -3,10 +3,13 @@ package top.weixiansen574.hybridfilexfer.droidcore;
 import android.os.Environment;
 import android.os.RemoteException;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +43,7 @@ import top.weixiansen574.hybridfilexfer.core.rpc.RpcPermissionException;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
 import top.weixiansen574.hybridfilexfer.core.rpc.TransferRequest;
+import top.weixiansen574.hybridfilexfer.core.security.PathGuard;
 import top.weixiansen574.hybridfilexfer.droidcore.callback.StartServerCallback;
 import top.weixiansen574.nio.DataByteChannel;
 
@@ -64,10 +68,22 @@ public class HFXServer extends HFXService implements RpcFileOps {
     private volatile String sessionEndReason;
 
     private final Config config;
+    private volatile PcAuthPrompter authPrompter;
+    private final PathGuard pathGuard;
 
     public HFXServer(IIOService ioService, Config config) {
         this.ioService = ioService;
         this.config = config;
+        List<File> roots = new ArrayList<>();
+        roots.add(Environment.getExternalStorageDirectory());
+        roots.add(new File("/storage/emulated/0"));
+        roots.add(new File("/sdcard"));
+        this.pathGuard = new PathGuard(roots, config != null && config.isAllowAllPaths());
+    }
+
+    /** 由界面层注入；未注入时未知电脑一律拒绝，避免无提示放行。 */
+    public void setAuthPrompter(PcAuthPrompter authPrompter) {
+        this.authPrompter = authPrompter;
     }
 
     public void startServer(int port, List<ServerNetInterface> interfaceList, int localBufferCount, int remoteBufferCount, StartServerCallback callback) throws IOException {
@@ -141,6 +157,30 @@ public class HFXServer extends HFXService implements RpcFileOps {
                     continue;
                 }
                 ctChannel.writeBoolean(true);//版本正确匹配
+                if (versionCode == RpcProtocol.VERSION_RPC) {
+                    // 301：在网卡与缓冲协商之前校验电脑身份与授权
+                    Integer authMagic = readIntWithTimeout(controlSocket, RpcProtocol.AUTH_LEGACY_GRACE_MS);
+                    if (authMagic == null) {
+                        // 旧 301 客户端不发送授权帧，保持旧行为（仅靠“允许电脑主动访问”全局开关）
+                    } else if (authMagic == RpcProtocol.AUTH_MAGIC) {
+                        String pcId = ctChannel.readUTF();
+                        String pcName = ctChannel.readUTF();
+                        AuthDecision decision = authorizePc(pcId, pcName);
+                        ctChannel.writeInt(RpcProtocol.AUTH_RESP_MAGIC);
+                        ctChannel.writeByte(decision.allow ? RpcProtocol.AUTH_OK : RpcProtocol.AUTH_DENIED);
+                        ctChannel.writeUTF(decision.allow ? "" : decision.reason);
+                        if (!decision.allow) {
+                            callback.onAuthDenied(pcName, decision.reason);
+                            ctChannel.close();
+                            closeConnections(accepted);
+                            continue;
+                        }
+                    } else {
+                        ctChannel.writeBytes("auth protocol error\n");
+                        ctChannel.close();
+                        continue;
+                    }
+                }
                 ctChannel.writeInt(interfaceList.size());//网卡IP数量
                 for (ServerNetInterface netInterface : interfaceList) {
                     byte[] address = netInterface.address.getAddress();
@@ -240,6 +280,100 @@ public class HFXServer extends HFXService implements RpcFileOps {
             }
         }
         return false;
+    }
+
+    /**
+     * 在阻塞 SocketChannel 上带超时地读一个 int，用于兼容不发送授权帧的旧 301 客户端。
+     * 超时且一个字节都没读到返回 null；读到一半则视为协议错误。
+     */
+    private static Integer readIntWithTimeout(SocketChannel channel, int timeoutMs) throws IOException {
+        channel.configureBlocking(false);
+        Selector selector = null;
+        try {
+            ByteBuffer buffer = ByteBuffer.allocate(4);
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            selector = Selector.open();
+            channel.register(selector, SelectionKey.OP_READ);
+            while (buffer.hasRemaining()) {
+                int read = channel.read(buffer);
+                if (read < 0) {
+                    throw new IOException("连接在授权握手前关闭");
+                }
+                if (read > 0) {
+                    continue;
+                }
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    if (buffer.position() > 0) {
+                        throw new IOException("授权帧不完整");
+                    }
+                    return null;
+                }
+                if (selector.select(remaining) == 0) {
+                    if (buffer.position() > 0) {
+                        throw new IOException("授权帧不完整");
+                    }
+                    return null;
+                }
+                selector.selectedKeys().clear();
+            }
+            buffer.flip();
+            return buffer.getInt();
+        } finally {
+            if (selector != null) {
+                selector.close();
+            }
+            channel.configureBlocking(true);
+        }
+    }
+
+    private AuthDecision authorizePc(String pcId, String pcName) {
+        if (config == null || !config.isAllowPcAccess()) {
+            return AuthDecision.deny("手机端未开启“允许电脑主动访问”，请在手机端菜单中打开后重试");
+        }
+        int status = config.getPcAuthStatus(pcId);
+        if (status == Config.PC_AUTH_ALLOW) {
+            config.touchPc(pcId, pcName);
+            return AuthDecision.allow();
+        }
+        if (status == Config.PC_AUTH_DENY) {
+            return AuthDecision.deny("此电脑已被手机端拒绝，请在手机端“已授权的电脑”中解除拒绝后重试");
+        }
+        PcAuthPrompter prompter = authPrompter;
+        if (prompter == null) {
+            return AuthDecision.deny("手机端无法显示授权确认窗口，请保持应用在前台后重试");
+        }
+        try {
+            PcAuthPrompter.Decision decision = prompter.requestPcAuth(pcId, pcName);
+            if (decision == null) {
+                return AuthDecision.deny("手机端未确认授权，连接已取消");
+            }
+            if (decision.remember) {
+                config.rememberPc(pcId, pcName,
+                        decision.allow ? Config.PC_AUTH_ALLOW : Config.PC_AUTH_DENY);
+            }
+            return decision.allow ? AuthDecision.allow() : AuthDecision.deny("手机端拒绝了这台电脑的连接");
+        } catch (Exception e) {
+            return AuthDecision.deny("手机端确认授权失败：" + e.getMessage());
+        }
+    }
+
+    private static final class AuthDecision {
+        final boolean allow;
+        final String reason;
+
+        private AuthDecision(boolean allow, String reason) {
+            this.allow = allow;
+            this.reason = reason;
+        }
+
+        static AuthDecision allow() {
+            return new AuthDecision(true, "");
+        }
+
+        static AuthDecision deny(String reason) {
+            return new AuthDecision(false, reason);
+        }
     }
 
     private void awaitSessionEnd() {
@@ -598,7 +732,9 @@ public class HFXServer extends HFXService implements RpcFileOps {
 
     @Override
     protected WriteFileCall createWriteFileCall(LinkedBlockingDeque<ByteBuffer> buffers, int dequeCount) {
-        return new DroidWriteFileCall(buffers, dequeCount, ioService);
+        // 300 保持原有行为；301 才应用根目录约束
+        return new DroidWriteFileCall(buffers, dequeCount, ioService,
+                protocolVersion == RpcProtocol.VERSION_RPC ? pathGuard : null);
     }
 
     @Override
@@ -617,18 +753,21 @@ public class HFXServer extends HFXService implements RpcFileOps {
     @Override
     public List<RemoteFile> rpcListFiles(String path) throws Exception {
         requirePcPermission();
+        pathGuard.checkReadable(path);
         return listLocalFiles(path);
     }
 
     @Override
     public boolean rpcDeleteFile(String path) throws Exception {
         requirePcPermission();
+        pathGuard.checkDelete(path);
         return ioService.deleteFile(path);
     }
 
     @Override
     public boolean rpcMkdir(String parent, String child) throws Exception {
         requirePcPermission();
+        pathGuard.checkWritable(new File(parent, child).getPath());
         return ioService.appendAndMkdirs(parent, child);
     }
 
@@ -646,6 +785,9 @@ public class HFXServer extends HFXService implements RpcFileOps {
     @Override
     public String rpcSendFiles(TransferRequest request) throws Exception {
         requirePcPermission();
+        for (RemoteFile file : request.files) {
+            pathGuard.checkReadable(file.getPath());
+        }
         return sendFilesToPeer(request.files, request.localDir, request.remoteDir, SILENT_CALLBACK);
     }
 

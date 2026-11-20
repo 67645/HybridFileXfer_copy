@@ -2,6 +2,7 @@ package top.weixiansen574.hybridfilexfer.gui;
 
 import top.weixiansen574.hybridfilexfer.core.Utils;
 import top.weixiansen574.hybridfilexfer.core.bean.Directory;
+import top.weixiansen574.hybridfilexfer.core.TransferException;
 import top.weixiansen574.hybridfilexfer.core.bean.RemoteFile;
 import top.weixiansen574.hybridfilexfer.core.bean.TrafficInfo;
 import top.weixiansen574.hybridfilexfer.core.callback.ClientCallBack;
@@ -64,7 +65,9 @@ import java.net.InetAddress;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -760,7 +763,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                 JdkHFXClient newClient = new JdkHFXClient(host, port, receiveDir);
                 ConnectServerCallback callback = new GuiConnectCallback();
                 if (!newClient.connectAuto(callback)) {
-                    uiLog(GuiStrings.get("connectFailed"), true);
+                    String reason = newClient.getLastConnectError();
+                    uiLog(reason != null && !reason.isEmpty()
+                            ? GuiStrings.get("connectDenied", reason)
+                            : GuiStrings.get("connectFailed"), true);
                     return;
                 }
                 client = newClient;
@@ -1100,11 +1106,60 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         }
     }
 
+    private static String describeTransferError(Exception e) {
+        if (e instanceof TransferException) {
+            return describeTransferCode(((TransferException) e).code, e.getMessage());
+        }
+        if (e instanceof RpcException) {
+            return GuiStrings.get("transferFailed", describeRpcErrorStatic((RpcException) e));
+        }
+        return GuiStrings.get("transferFailed", e);
+    }
+
+    private static String describeTransferCode(int code, String message) {
+        String detail = message == null ? "" : message;
+        switch (code) {
+            case TransferException.CODE_PERMISSION:
+                return GuiStrings.get("transferErrorPermission", detail);
+            case TransferException.CODE_PATH:
+                return GuiStrings.get("transferErrorPath", detail);
+            case TransferException.CODE_NO_SPACE:
+                return GuiStrings.get("transferErrorNoSpace", detail);
+            case TransferException.CODE_DISCONNECTED:
+                return GuiStrings.get("transferErrorDisconnected", detail);
+            default:
+                return GuiStrings.get("transferErrorIo", detail);
+        }
+    }
+
+    private static String describeRpcErrorStatic(RpcException e) {
+        if (e.status == RpcProtocol.ERR_BUSY) {
+            return GuiStrings.get("opBusy");
+        }
+        if (e.status == RpcProtocol.ERR_PERMISSION) {
+            // 优先展示手机端的具体原因（路径越界、授权拒绝等）
+            String message = e.getMessage();
+            if (message != null && !message.trim().isEmpty() && !"PERMISSION".equals(message)) {
+                return message;
+            }
+            return GuiStrings.get("opPermission");
+        }
+        if (e.status == RpcProtocol.ERR_UNSUPPORTED) {
+            return GuiStrings.get("opUnsupported");
+        }
+        return e.getMessage() == null ? ("status=" + e.status) : e.getMessage();
+    }
+
     private String describeRpcError(RpcException e) {
         if (e.status == RpcProtocol.ERR_BUSY) {
             return GuiStrings.get("opBusy");
         }
         if (e.status == RpcProtocol.ERR_PERMISSION) {
+            // 优先展示手机端的具体原因（路径越界、授权拒绝等）
+            String message = e.getMessage();
+            if (message != null && !message.trim().isEmpty() && !"PERMISSION".equals(message)) {
+                return message;
+            }
             return GuiStrings.get("opPermission");
         }
         if (e.status == RpcProtocol.ERR_UNSUPPORTED) {
@@ -1140,10 +1195,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
             ThemedDialog.warn(this, GuiStrings.get("tabFiles"), GuiStrings.get("selectToPull"));
             return;
         }
-        List<RemoteFile> files = new ArrayList<>();
+        List<RemoteFile> selected = new ArrayList<>();
         for (int row : rows) {
             if (row >= 0 && row < currentFiles.size()) {
-                files.add(currentFiles.get(row));
+                selected.add(currentFiles.get(row));
             }
         }
         applyReceiveDirQuietly();
@@ -1158,8 +1213,29 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         int remoteFs = remoteFileSystem;
         Directory local = new Directory(localDir.getAbsolutePath(), Directory.getCurrentFileSystem());
         Directory remote = new Directory(sourceDirPath, remoteFs);
-        enqueue(GuiStrings.get("pullTitle", files.size()), files.get(0).getPath(), () -> {
-            client.pullFiles(files, local, remote, new GuiTransferCallback());
+        List<RemoteFile> prepared = new ArrayList<>();
+        for (RemoteFile file : selected) {
+            String target = remote.generateTransferPath(file.getPath(), local);
+            RemoteFile candidate = file;
+            if (new File(target).exists()) {
+                ConflictChoice choice = askConflict(file.getName(), !file.isDirectory());
+                if (choice.action == CONFLICT_SKIP) {
+                    continue;
+                }
+                if (choice.action == CONFLICT_CANCEL) {
+                    return;
+                }
+                if (choice.action == CONFLICT_RENAME) {
+                    candidate = new RemoteFile(file, choice.newName);
+                }
+            }
+            prepared.add(candidate);
+        }
+        if (prepared.isEmpty()) {
+            return;
+        }
+        enqueue(GuiStrings.get("pullTitle", prepared.size()), prepared.get(0).getPath(), () -> {
+            client.pullFiles(prepared, local, remote, new GuiTransferCallback());
             return true;
         });
     }
@@ -1183,15 +1259,154 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         }
         int remoteFs = remoteFileSystem;
         enqueue(GuiStrings.get("pushTitle", files.size()), targetPath, () -> {
+            Set<String> existing = new HashSet<>();
+            try {
+                List<RemoteFile> remoteListing = client.requestListFiles(targetPath);
+                if (remoteListing != null) {
+                    for (RemoteFile remoteFile : remoteListing) {
+                        existing.add(remoteFile.getName());
+                    }
+                }
+            } catch (Exception ignored) {
+                // 列表失败时不阻断推送，真正的权限/路径错误会由传输层返回
+            }
+            List<File> conflicts = new ArrayList<>();
             for (File file : files) {
+                if (existing.contains(file.getName())) {
+                    conflicts.add(file);
+                }
+            }
+            boolean replaceAll = false;
+            if (conflicts.size() > 1) {
+                int bulk = askBulkConflictBlocking(conflicts.size());
+                if (bulk == 2 || bulk < 0) {
+                    return true;
+                }
+                replaceAll = bulk == 0;
+            }
+            for (File file : files) {
+                RemoteFile remoteFile = new RemoteFile(file);
+                if (existing.contains(file.getName())) {
+                    if (conflicts.size() > 1) {
+                        if (!replaceAll) {
+                            continue;
+                        }
+                    } else {
+                        ConflictChoice choice = askConflictBlocking(file.getName(), !file.isDirectory());
+                        if (choice.action == CONFLICT_SKIP) {
+                            continue;
+                        }
+                        if (choice.action == CONFLICT_CANCEL) {
+                            return true;
+                        }
+                        if (choice.action == CONFLICT_RENAME) {
+                            remoteFile = new RemoteFile(file, choice.newName);
+                        }
+                    }
+                }
                 List<RemoteFile> remoteFiles = new ArrayList<>();
-                remoteFiles.add(new RemoteFile(file));
+                remoteFiles.add(remoteFile);
                 Directory local = new Directory(file.getParent(), Directory.getCurrentFileSystem());
                 Directory remote = new Directory(targetPath, remoteFs);
                 client.pushFiles(remoteFiles, local, remote, new GuiTransferCallback());
             }
             return true;
         });
+    }
+
+    private static final int CONFLICT_SKIP = 0;
+    private static final int CONFLICT_REPLACE = 1;
+    private static final int CONFLICT_RENAME = 2;
+    private static final int CONFLICT_CANCEL = 3;
+
+    private static final class ConflictChoice {
+        final int action;
+        final String newName;
+
+        ConflictChoice(int action, String newName) {
+            this.action = action;
+            this.newName = newName;
+        }
+
+        static ConflictChoice cancel() {
+            return new ConflictChoice(CONFLICT_CANCEL, null);
+        }
+    }
+
+    /** 在 EDT 上询问同名项处理方式。 */
+    private ConflictChoice askConflict(String name, boolean allowRename) {
+        String[] options = allowRename
+                ? new String[]{GuiStrings.get("overwriteReplace"), GuiStrings.get("overwriteSkip"),
+                GuiStrings.get("overwriteRename"), GuiStrings.get("overwriteCancel")}
+                : new String[]{GuiStrings.get("overwriteReplace"), GuiStrings.get("overwriteSkip"),
+                GuiStrings.get("overwriteCancel")};
+        int index = ThemedDialog.choice(this, GuiStrings.get("overwriteTitle"),
+                GuiStrings.get("overwriteMessage", name), options);
+        if (index == 0) {
+            return new ConflictChoice(CONFLICT_REPLACE, null);
+        }
+        if (index == 1) {
+            return new ConflictChoice(CONFLICT_SKIP, null);
+        }
+        if (allowRename && index == 2) {
+            String newName = askNewName(name);
+            return newName == null
+                    ? ConflictChoice.cancel()
+                    : new ConflictChoice(CONFLICT_RENAME, newName);
+        }
+        return ConflictChoice.cancel();
+    }
+
+    private String askNewName(String initial) {
+        while (true) {
+            String input = ThemedDialog.input(this, GuiStrings.get("overwriteRenameTitle"),
+                    GuiStrings.get("overwriteRenamePrompt"), initial);
+            if (input == null) {
+                return null;
+            }
+            String name = input.trim();
+            if (name.isEmpty() || ".".equals(name) || "..".equals(name)
+                    || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+                ThemedDialog.warn(this, GuiStrings.get("overwriteRenameTitle"),
+                        GuiStrings.get("overwriteRenameInvalid"));
+                continue;
+            }
+            return name;
+        }
+    }
+
+    private ConflictChoice askConflictBlocking(String name, boolean allowRename) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            return askConflict(name, allowRename);
+        }
+        ConflictChoice[] result = {ConflictChoice.cancel()};
+        try {
+            SwingUtilities.invokeAndWait(() -> result[0] = askConflict(name, allowRename));
+        } catch (Exception e) {
+            return ConflictChoice.cancel();
+        }
+        return result[0];
+    }
+
+    /** 多个同名项时一次性询问；返回 0 全部覆盖、1 全部跳过、2 取消。 */
+    private int askBulkConflictBlocking(int count) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            return askBulkConflict(count);
+        }
+        int[] result = {2};
+        try {
+            SwingUtilities.invokeAndWait(() -> result[0] = askBulkConflict(count));
+        } catch (Exception e) {
+            return 2;
+        }
+        return result[0];
+    }
+
+    private int askBulkConflict(int count) {
+        return ThemedDialog.choice(this, GuiStrings.get("overwriteTitle"),
+                GuiStrings.get("overwriteMultiple", count),
+                GuiStrings.get("overwriteReplaceAll"), GuiStrings.get("overwriteSkipAll"),
+                GuiStrings.get("overwriteCancel"));
     }
 
     private interface TransferJob {
@@ -1224,7 +1439,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                 ok = job.run();
             } catch (Exception e) {
                 ok = false;
-                uiLog(GuiStrings.get("transferFailed", e), true);
+                // TransferException 已由回调给出分类提示，避免重复；RPC 错误在这里展示
+                if (!(e instanceof TransferException)) {
+                    uiLog(describeTransferError(e), true);
+                }
             }
             boolean finalOk = ok;
             uiLater(() -> {
@@ -1326,6 +1544,20 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         @Override
         public void onExit() {
             uiLog(GuiStrings.get("disconnected"));
+        }
+
+        @Override
+        public void onPeerClosed(String reason) {
+            uiLog(GuiStrings.get("connectionLost", reason), true);
+            onExit();
+        }
+
+        @Override
+        public void onTransferFailed(int code, String message) {
+            uiLog(describeTransferCode(code, message), true);
+            if (!transferActive) {
+                stopProgress(false);
+            }
         }
 
         @Override

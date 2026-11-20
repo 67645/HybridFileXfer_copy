@@ -33,6 +33,14 @@
                 android:checked="false"
                 android:title="@string/yun_xu_dian_nao_zhu_dong_fang_wen" />
             <item
+                android:id="@+id/authorized_pcs"
+                android:title="@string/pc_auth_manage_title" />
+            <item
+                android:id="@+id/allow_all_paths"
+                android:checkable="true"
+                android:checked="false"
+                android:title="@string/allow_all_paths" />
+            <item
                 android:id="@+id/client"
                 android:icon="@drawable/baseline_phonelink_ring_24"
                 android:title="@string/lian_jie_shou_ji_fu_wu_duan" />

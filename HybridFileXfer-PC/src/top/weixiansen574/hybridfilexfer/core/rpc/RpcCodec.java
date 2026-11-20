@@ -102,6 +102,8 @@ public final class RpcCodec {
         out.writeInt(request.files.size());
         for (RemoteFile file : request.files) {
             out.writeUTF(file.getPath());
+            // 301 覆盖确认里的重命名目标；空串表示沿用原名
+            out.writeUTF(file.getTransferName() == null ? "" : file.getTransferName());
         }
         out.writeUTF(request.localDir.path);
         out.writeInt(request.localDir.fileSystem);
@@ -121,7 +123,9 @@ public final class RpcCodec {
         }
         List<RemoteFile> files = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            files.add(new RemoteFile(new java.io.File(in.readUTF())));
+            java.io.File file = new java.io.File(in.readUTF());
+            String transferName = in.readUTF();
+            files.add(new RemoteFile(file, transferName.isEmpty() ? null : transferName));
         }
         Directory remoteDir = new Directory(in.readUTF(), in.readInt());
         Directory localDir = new Directory(in.readUTF(), localFileSystem);

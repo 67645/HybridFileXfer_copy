@@ -92,6 +92,37 @@ public class ThemedDialog extends JDialog {
         return showMessage(parent, title, message, true);
     }
 
+    /** 多按钮选择；返回按钮下标，关闭窗口返回 -1。 */
+    public static int choice(Component parent, String title, String message, String... options) {
+        ThemedDialog dialog = new ThemedDialog(ownerOf(parent), title, false);
+        JPanel content = dialog.getContent();
+        content.setBorder(BorderFactory.createEmptyBorder(20, 24, 18, 24));
+        content.setLayout(new BorderLayout(0, 18));
+
+        JLabel text = new JLabel(toHtml(message));
+        text.setForeground(ThemeManager.palette().text);
+        content.add(text, BorderLayout.CENTER);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttons.setOpaque(false);
+        final int[] result = {-1};
+        for (int i = 0; i < options.length; i++) {
+            final int index = i;
+            JButton button = new JButton(options[i]);
+            button.addActionListener(e -> {
+                result[0] = index;
+                dialog.dispose();
+            });
+            buttons.add(button);
+        }
+        content.add(buttons, BorderLayout.SOUTH);
+        dialog.pack();
+        dialog.setMinimumSize(new Dimension(360, dialog.getHeight()));
+        dialog.setLocationRelativeTo(parent);
+        dialog.setVisible(true);
+        return result[0];
+    }
+
     private static boolean showMessage(Component parent, String title, String message, boolean confirm) {
         ThemedDialog dialog = new ThemedDialog(ownerOf(parent), title, false);
         JPanel content = dialog.getContent();

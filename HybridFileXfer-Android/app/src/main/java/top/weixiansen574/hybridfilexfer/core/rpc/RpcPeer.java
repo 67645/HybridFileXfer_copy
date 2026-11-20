@@ -9,12 +9,14 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import top.weixiansen574.hybridfilexfer.core.bean.Directory;
+import top.weixiansen574.hybridfilexfer.core.security.PathForbiddenException;
 import top.weixiansen574.nio.DataByteChannel;
 
 /**
@@ -35,8 +37,11 @@ public class RpcPeer {
     private final AtomicInteger seqGenerator = new AtomicInteger(1);
     private final ConcurrentHashMap<Integer, CompletableFuture<RpcResult>> pending = new ConcurrentHashMap<>();
     private final ExecutorService handlerExecutor;
+    private final ScheduledExecutorService heartbeatExecutor;
     private final Thread readerThread;
     private volatile boolean running = true;
+    private volatile long lastReadAt = System.currentTimeMillis();
+    private volatile boolean heartbeatTimeout;
 
     public RpcPeer(DataByteChannel channel, RpcFileOps ops, String name) {
         this.channel = channel;
@@ -47,9 +52,48 @@ public class RpcPeer {
             return thread;
         };
         this.handlerExecutor = Executors.newSingleThreadExecutor(handlerFactory);
+        this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, name + "-Heartbeat");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.heartbeatExecutor.scheduleWithFixedDelay(this::heartbeat,
+                RpcProtocol.HEARTBEAT_INTERVAL_MS, RpcProtocol.HEARTBEAT_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
         this.readerThread = new Thread(this::readLoop, name + "-RpcReader");
         this.readerThread.setDaemon(true);
         this.readerThread.start();
+    }
+
+    /**
+     * 控制通道空闲时主动发 PING；超过阈值没有任何入站帧就判定为断线。
+     * PING 的应答由读线程直接回，不会排到串行命令队列后面。
+     */
+    private void heartbeat() {
+        if (!running) {
+            return;
+        }
+        long idle = System.currentTimeMillis() - lastReadAt;
+        if (idle >= RpcProtocol.HEARTBEAT_TIMEOUT_MS) {
+            heartbeatTimeout = true;
+            closeChannel();
+            return;
+        }
+        if (idle >= RpcProtocol.HEARTBEAT_INTERVAL_MS) {
+            try {
+                writeFrame(seqGenerator.getAndIncrement(), RpcProtocol.CMD_PING, null);
+            } catch (IOException e) {
+                heartbeatTimeout = true;
+                closeChannel();
+            }
+        }
+    }
+
+    private void closeChannel() {
+        try {
+            channel.close();
+        } catch (IOException ignored) {
+        }
     }
 
     public boolean isRunning() {
@@ -138,6 +182,12 @@ public class RpcPeer {
                 if (length > 0) {
                     channel.readFully(ByteBuffer.wrap(payload));
                 }
+                lastReadAt = System.currentTimeMillis();
+                if (cmd == RpcProtocol.CMD_PING) {
+                    // 心跳直接回，不进入串行命令队列，避免长操作把心跳堵住
+                    writeFrame(seq, RpcProtocol.CMD_RESPONSE, buildResponse(RpcProtocol.OK, EMPTY));
+                    continue;
+                }
                 if (cmd == RpcProtocol.CMD_RESPONSE) {
                     dispatchResponse(seq, payload);
                 } else if (cmd != RpcProtocol.CMD_SHUTDOWN && ops.rpcIsBusy()) {
@@ -155,11 +205,12 @@ public class RpcPeer {
                 }
             }
         } catch (Exception e) {
-            reason = e.toString();
+            reason = heartbeatTimeout ? "心跳超时，连接已断开" : e.toString();
         }
         running = false;
         failAllPending(reason);
         handlerExecutor.shutdownNow();
+        heartbeatExecutor.shutdownNow();
         try {
             ops.rpcOnPeerClosed(reason);
         } catch (Exception ignored) {
@@ -248,7 +299,7 @@ public class RpcPeer {
                     status = RpcProtocol.ERR_UNSUPPORTED;
                     break;
             }
-        } catch (RpcPermissionException e) {
+        } catch (RpcPermissionException | PathForbiddenException e) {
             try {
                 body = RpcCodec.encodeMessage(e.getMessage());
             } catch (IOException io) {
@@ -257,7 +308,7 @@ public class RpcPeer {
             status = RpcProtocol.ERR_PERMISSION;
         } catch (Exception e) {
             try {
-                body = RpcCodec.encodeMessage(String.valueOf(e));
+                body = RpcCodec.encodeMessage(e.getMessage() == null ? e.toString() : e.getMessage());
             } catch (IOException io) {
                 body = EMPTY;
             }
@@ -283,5 +334,6 @@ public class RpcPeer {
         running = false;
         failAllPending("主动关闭");
         handlerExecutor.shutdownNow();
+        heartbeatExecutor.shutdownNow();
     }
 }

@@ -15,6 +15,7 @@ import top.weixiansen574.hybridfilexfer.core.callback.TransferFileCallback;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcCodec;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcException;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcPeer;
+import top.weixiansen574.hybridfilexfer.core.rpc.RpcPermissionException;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcProtocol;
 import top.weixiansen574.hybridfilexfer.core.rpc.RpcResult;
 import top.weixiansen574.hybridfilexfer.core.rpc.TransferRequest;
@@ -272,10 +273,15 @@ public abstract class HFXService {
     }
 
     /** 301：作为被请求方接收对端推送的文件。返回 null 表示成功。 */
-    protected String receiveFilesFromPeer(TransferFileCallback callback) throws IOException {
+    protected String receiveFilesFromPeer(TransferFileCallback callback) throws Exception {
         transferBusy = true;
         try {
             return receiveFilesFramed(callback) ? null : "接收文件失败";
+        } catch (TransferException e) {
+            if (e.code == TransferException.CODE_PERMISSION || e.code == TransferException.CODE_PATH) {
+                throw new RpcPermissionException(e.getMessage());
+            }
+            return e.getMessage();
         } finally {
             transferBusy = false;
         }
@@ -283,10 +289,15 @@ public abstract class HFXService {
 
     /** 301：作为被请求方把文件发送给对端。返回 null 表示成功。 */
     protected String sendFilesToPeer(List<RemoteFile> files, Directory localDir, Directory remoteDir,
-                                     TransferFileCallback callback) throws IOException {
+                                     TransferFileCallback callback) throws Exception {
         transferBusy = true;
         try {
             return sendFilesFramed(files, localDir, remoteDir, callback) ? null : "发送文件失败";
+        } catch (TransferException e) {
+            if (e.code == TransferException.CODE_PERMISSION || e.code == TransferException.CODE_PATH) {
+                throw new RpcPermissionException(e.getMessage());
+            }
+            return e.getMessage();
         } finally {
             transferBusy = false;
         }
@@ -349,9 +360,10 @@ public abstract class HFXService {
             }
             readFileTask.get();
         } catch (ExecutionException e) {
-            complete = false;
-            Throwable cause = e.getCause();
-            callback.onReadFileError(cause != null ? cause.toString() : e.toString());
+            speedMonitorThread.cancel();
+            TransferException error = TransferException.from(e.getCause());
+            callback.onTransferFailed(error.code, error.getMessage());
+            throw error;
         } catch (InterruptedException e) {
             complete = false;
             Thread.currentThread().interrupt();
@@ -397,9 +409,10 @@ public abstract class HFXService {
                 task.get();
             }
         } catch (ExecutionException e) {
-            complete = false;
-            Throwable cause = e.getCause();
-            callback.onWriteFileError(cause != null ? cause.toString() : e.toString());
+            speedMonitorThread.cancel();
+            TransferException error = TransferException.from(e.getCause());
+            callback.onTransferFailed(error.code, error.getMessage());
+            throw error;
         } catch (InterruptedException e) {
             complete = false;
             Thread.currentThread().interrupt();

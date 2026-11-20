@@ -146,4 +146,20 @@
     <string name="controller_channel_ip">Controller channel IP</string>
     <string name="any_connectable_network_card_ip">Any connectable network card IP</string>
     <string name="home_dir">Home directory</string>
+    <string name="pc_auth_title">Computer connection request</string>
+    <string name="pc_auth_message">Computer \"%1$s\"\nID: %2$s\n\nAllow this computer to access files on this phone?</string>
+    <string name="remember_pc">Remember this computer (don\'t ask again)</string>
+    <string name="pc_auth_allow">Allow</string>
+    <string name="pc_auth_deny">Deny</string>
+    <string name="pc_auth_manage_title">Authorized computers</string>
+    <string name="pc_auth_empty">No remembered computers yet.</string>
+    <string name="pc_authorized_item">%1$s\nID: %2$s · Last: %3$s</string>
+    <string name="pc_denied_item">%1$s (denied)\nID: %2$s · Last: %3$s</string>
+    <string name="pc_auth_revoke_title">Remove remembered computer</string>
+    <string name="pc_auth_revoke_message">Remove the authorization/deny record for \"%1$s\"? The next connection will ask again.</string>
+    <string name="pc_auth_revoked">Removed</string>
+    <string name="auth_denied_toast">Denied %1$s: %2$s</string>
+    <string name="allow_all_paths">Allow access to all storage (off by default)</string>
+    <string name="allow_all_paths_on">All-storage access enabled</string>
+    <string name="allow_all_paths_off">All-storage access disabled</string>
 </resources>

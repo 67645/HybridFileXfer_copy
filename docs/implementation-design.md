@@ -1,6 +1,6 @@
 # HybridFileXfer GUI 与双向协议实施设计
 
-> 状态：阶段 1-5 已实施完成；beta4 试运行包已发布（2026-11-20）
+> 状态：阶段 1-5 已实施完成；beta5 试运行包已发布（2026-11-20，新增握手授权、路径范围约束、断线检测与失败原因）
 > 适用分支：`feature/gui`
 > 本文档保留改造前的基线事实（第 1 节），其余章节以最终实现为准；可复用的经验条目见 `docs/gui-experience-notes.md`。
 
@@ -146,6 +146,7 @@
   - `--protocol=auto`：先尝试 301，若被拒绝且对方版本为 300，则**重新建连**并以 300 完成握手。
 - 实现结果：GUI 默认 `connectAuto`；CLI 默认 300，可显式 `--protocol=301` 或 `--protocol=auto`。300 回退后 GUI 只保留被动收发，主动浏览/文件管理/推送按钮禁用，并提示“兼容模式”。
 - 旧服务端拒绝 301 的行为是现成的：`versionCode != VERSION_CODE` → 回写 `false` + 自身版本号并关闭连接。
+- **beta5 顺序约定**：301 握手在“版本号确认”之后、网卡与缓冲协商之前插入一段授权交换（见 4.7）。300 完全跳过该段，字节序列与旧版逐字节一致。
 
 ### 4.2 帧格式
 
@@ -163,7 +164,7 @@
 
 ### 4.3 命令与错误码
 
-命令（最终实现：0/1/2/3/10/11/100 均已落地；120 预留）：
+命令（最终实现：0/1/2/3/10/11/100/121 均已落地；120 预留）：
 
 | 值 | 名称 | 方向 | 请求体 | 响应体 |
 |---|---|---|---|---|
@@ -175,6 +176,7 @@
 | 11 | REQUEST_SEND / SEND_FILES | 双向 | int count + UTF path… + UTF 目标目录 + int 目标文件系统 + UTF 源目录 | OK；发送在 handler 线程内完成 |
 | 100 | QUERY_INFO | 双向 | 空 | int 文件系统 + UTF 主目录 |
 | 120 | CANCEL_JOB（预留） | 双向 | int jobId | byte bool |
+| 121 | PING | 双向 | 空 | OK（读线程直接回，不进 handler 队列） |
 
 GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QUERY_INFO` 用于连接后取手机主目录与文件系统类型。
 
@@ -189,7 +191,10 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 | 2 | ERR_UNSUPPORTED | 该版本暂未实现 |
 | 3 | ERR_IO | 本端 IO 异常 |
 | 4 | ERR_BUSY | 传输进行中 |
-| 5 | ERR_PERMISSION | 手机端未授权 PC 访问 |
+| 5 | ERR_PERMISSION | 未授权访问、路径超出允许范围、删除受保护的根目录等权限类失败 |
+
+- beta5 起 `ERR_PERMISSION` 的 body 携带服务端可读原因（如“路径不在允许范围内”“不能删除允许范围的根目录”），GUI 优先展示该原因，不再一律显示“无权限”。
+- 传输类失败在 301 下由 `TransferException` 归类（权限/路径/磁盘满/连接中断/IO），见 4.10。
 
 ### 4.4 传输期串行与 ERR_BUSY
 
@@ -220,6 +225,48 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 - 客户端每条通道建立连接都带 5s 超时；某张网卡不可达时只跳过该网卡（发 `false`+名称），其余网卡继续握手。服务端对称地跳过并在会话可用通道为空时才放弃本次会话，因此传输入口不会再被单张未就绪网卡长期阻塞。
 - 原生缓冲区的释放必须串行化（`synchronized`），停止服务时会话线程与断开线程可能同时释放，重复 free 会直接使进程崩溃。
 - 实测：断开后无需重启服务即可再次连接；单张网卡未就绪只影响该通道，其余通道可正常传输。
+
+### 4.7 握手阶段授权（beta5，仅 301）
+
+- **时序**：`HFXC` 魔数 + 版本 → 服务端回 `true`/`false` + 版本 → 版本为 301 时，客户端立即发送授权请求，服务端校验后才继续网卡与缓冲区协商。300 不进入该段。
+- **请求**（客户端 → 服务端）：`int AUTH_MAGIC(0x48465841 "HFXA")` + `UTF pcId` + `UTF pcName`。
+- **应答**（服务端 → 客户端）：`int AUTH_RESP_MAGIC(0x48465852 "HFXR")` + `byte status`（0 允许 / 1 拒绝）+ `UTF reason`。
+- **服务端兼容窗口**：服务端读取授权魔数时用 2s 超时（`readIntWithTimeout`，非阻塞 + Selector）。超时或读到旧版首个协商字段，则视为“旧 301 客户端”，跳过授权继续原流程；读到魔数但内容不匹配则主动断开。这样 beta4 与 beta5 的 301 可以单向兼容，但**推荐两端同时升级**（旧 301 客户端不受按电脑授权保护）。
+- **拒绝处理**：服务端先写应答再关闭会话，客户端抛 `PcAuthException`，`getLastConnectError()` 保存可读原因；GUI 连接失败对话框显示该原因，CLI 在退出前打印。
+- **电脑标识**（`core/auth/PcIdentity`）：首次运行生成随机 UUID，保存到 `~/.hybridfilexfer/pc-identity.properties`（不可写时退到 `java.io.tmpdir`），连同主机名（截断 64 字符）作为 `pcName`。重装 jar 不变，删除配置文件才会重新生成。
+- **手机端允许列表**（`Config.getPcAuthStatus/rememberPc/touchPc/removePc/listPcAuth`）：SharedPreferences `pc_auth_list` 存 JSON 数组 `{id,name,status,last}`，`status` 为 0 未知 / 1 允许 / 2 拒绝。
+  - 未知电脑：通过 `PcAuthPrompter` 请求主线程弹框（“允许 / 拒绝”，默认勾选“记住这台电脑”，60s 无操作视为拒绝），结果按是否记住写入列表。
+  - 已允许：更新最后连接时间后放行；已拒绝：直接返回拒绝原因，不弹框。
+- **与全局开关的关系**：菜单“允许电脑主动访问”仍是最高优先级总闸，关闭时无论列表是否允许都拒绝；开启后才进入按电脑判断。旧的 300 客户端没有授权帧，仍只受总闸约束——这是保留 300 兼容的取舍。
+- **手机端管理界面**：菜单“已授权的电脑”列出名称、状态（已允许/已拒绝）、最后连接时间；点击条目二次确认后撤销（删除记录），下次连接重新询问。
+
+### 4.8 路径范围约束（beta5，仅 301）
+
+- **`core/security/PathGuard`**：构造时给出允许根目录列表与 `allowAll` 开关，提供 `checkReadable/checkWritable/checkDelete`；越界统一抛 `PathForbiddenException`（`IOException` 子类，消息可直接给用户）。
+- **判定方式**：先拒绝包含 `..` 的路径段；再取“最近的存在祖先”做真实路径解析，最后拼回不存在的尾部。Windows 下 `File.getCanonicalPath` 不解析 junction，因此通过反射调用 `java.nio.file.Path.toRealPath`（以公开接口 `Path` 调用，避免 WindowsPath 访问权限问题）；Linux/Android 的 `getCanonicalPath` 本身解析符号链接。
+- **根目录保护**：`checkDelete` 传入 `rejectRoot=true`，删除对象等于或位于根白名单本身时返回“不能删除允许范围的根目录”。
+- **手机端根目录**：`Environment.getExternalStorageDirectory()`、`/storage/emulated/0`、`/sdcard`；菜单“允许访问全部存储”对应 `Config.isAllowAllPaths()`（默认 false），打开后 `PathGuard` 放行全部路径。该开关只影响 301 路径校验，不改变 300 行为。
+- **电脑端根目录**：`HFXClient` 以接收/发送根目录（默认 `homeDir`，空则为 `/`）构造 `PathGuard`，限制 `rpcListFiles/rpcDeleteFile/rpcMkdir/rpcSendFiles` 与写文件回调。
+- **300 兼容**：`JdkWriteFileCall`/`DroidWriteFileCall` 仅在 301 收到非空 `PathGuard` 时检查；300 传 `null`，行为不变。
+- **符号链接结论**：早期静态分析担心“`getCanonicalPath` 漏掉链接逃逸”。实测 Android 上符号链接由 `getCanonicalPath` 正确解析；Windows 上目录联接（junction）确实绕过 canonical，改用 `toRealPath` 后 `root\escape\secret.txt` 被正确拒绝。因此保留双重解析策略，而不是额外加黑白名单。
+- **Android 删除**：`IOServiceImpl.deleteFile` 对符号链接直接 `File.delete()`（`Os.lstat` + `S_ISLNK` 判断），避免顺着链接删到范围外。
+
+### 4.9 覆盖同名文件（beta5，GUI）
+
+- **冲突询问**：推送与拉取在真正传输前检查目标端是否已存在同名项，弹出“跳过 / 覆盖 / 重命名 / 取消”；一次多于一个冲突时可“全部覆盖 / 全部跳过”。
+- **重命名载体**：`RemoteFile` 新增 `transferName` 字段，301 传输请求在每个文件条目后追加 `UTF transferName`（空串表示不改名）；`Directory.generateTransferPath(file, remote, transferName)` 只替换最后一段路径。
+- **限制**：只对文件提供重命名；目录冲突只给跳过/覆盖，避免递归改名产生不可预期的大范围改动。
+- **校验**：重命名输入拒绝空串、`.`、`..` 和路径分隔符。
+- **兼容**：300 的传输请求不带 `transferName`，走原有路径生成逻辑。
+
+### 4.10 心跳与传输失败原因（beta5，仅 301）
+
+- **心跳**：`RpcPeer` 读线程记录 `lastReadAt`；`ScheduledExecutorService` 每 5s 检查，空闲超过 5s 主动发 `CMD_PING`，超过 20s 无任何帧则关闭连接，断开原因固定为“心跳超时，连接已断开”。
+- **PING 直回**：读线程识别 `CMD_PING` 后直接写应答，不进入单线程 handler 队列，避免被长传输或大目录请求堵住。
+- **客户端回调**：`ClientCallBack.onPeerClosed(reason)` 默认调用 `onExit()`；GUI 覆写后写日志“连接中断”并复位界面，不再长期显示已连接。
+- **失败原因**：新增 `core/TransferException`，代码 `1 权限 / 2 路径 / 3 磁盘空间不足 / 4 连接中断 / 5 IO`，`from(Throwable)` 按异常链与消息归类；传输回调新增 `onTransferFailed(int code, String message)`，GUI 映射为“未授权 / 路径不可写 / 磁盘已满 / 连接中断”等可读文案。
+- **服务端映射**：路径与权限类异常在 `RpcPeer` 转成 `ERR_PERMISSION` + 原因；`HFXService` 的帧式收/发捕获 `ExecutionException` 后归类并回调 `onTransferFailed`，再把异常抛给 RPC 层形成失败状态码。
+- **300**：不启用心跳，仍用 1s 空闲探测判断断开（见 4.6）；传输失败仍走旧布尔回调。
 
 ---
 
@@ -268,9 +315,11 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 | 网络失败 | 连接被拒、超时、IP 不可达 | 区分"服务端未启动"与"网络不可达" |
 | 版本不兼容 | 301 被拒 | 自动降级并提示"已切换到兼容模式" |
 | 协议异常 | 帧越界、seq 超时、未知命令 | 断开并记录，不静默 |
-| 权限不足 | 手机端未开启 PC 访问 | 提示在手机端开启授权 |
+| 权限不足 | 手机端未开启 PC 访问、电脑被拒绝、路径越界 | 提示在手机端开启授权，或到“已授权的电脑”撤销拒绝；路径越界提示“路径不在允许范围内” |
 | 传输错误 | 读/写错误、通道中断、ERR_BUSY | 分通道展示，可重试 |
-| 磁盘问题 | 接收目录不可写、空间不足 | 传输前预检查 |
+| 传输失败原因 | 未授权、路径不可写、磁盘已满、连接中断 | 显示对应可读文案，不再只有“接收文件失败” |
+| 磁盘问题 | 接收目录不可写、空间不足 | 传输前预检查；写入失败按 `TransferException` 归类 |
+| 覆盖冲突 | 目标端已有同名文件/文件夹 | 弹窗询问跳过/覆盖/重命名，可批量应用 |
 | 文件管理 | 新建重名、名称非法、根目录不可写、删除失败 | 弹窗说明具体原因，完成后刷新当前目录 |
 | 危险操作 | 删除根目录或当前所在目录 | GUI 直接阻止并提示，不发送 RPC |
 | 传输中操作 | 浏览/新建/删除/推送 | 按钮禁用，协议侧回 ERR_BUSY |
@@ -288,15 +337,15 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 5. artifact 配置中的 `HybirdFileXfer.jar` 笔误。**无对应文件**：本仓库副本不含 `.idea/artifacts`。
 6. `HybridFileXferLauncher`（C#）。**未纳入发行包**：本环境缺少 .NET SDK，无法构建；源码保留。
 
-### 7.2 构建与发行流程（beta4 实际执行）
+### 7.2 构建与发行流程（beta5 实际执行）
 
 1. 编译：`javac --release 8 -encoding UTF-8 -cp <annotations桩> -d classes @sources.txt`。
-2. 资源：把 `messages_gui.properties`、`messages_gui_zh_CN.properties` 复制到 `classes` 的包目录。
-3. 打包：`jar --create --file HybridFileXfer.jar --main-class top.weixiansen574.hybridfilexfer.Main -C classes .`。
-4. 组装目录：jar、`start.exe`、adb 三件套（`adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll`）、Android APK、bat 脚本、使用说明，共 13 个文件。
-5. 压缩：`HybridFileXfer-3.0.0-beta4-win-x64.zip`。
-6. 记录校验值：8,180,552 字节，SHA-256 `4D400D3745A0BA986FB6E751A517F3843EBA035064DECB20B7CBA0FEE9C35FC2`。
-7. 冒烟：解压到干净目录 → jar 哈希与源目录一致 → `java -jar` 启动 → 检查进程与窗口标题 → 结束并清理。
+2. 资源：把 `messages.properties` 系列复制到 `classes` 根目录，`messages_gui.properties`、`messages_gui_zh_CN.properties` 复制到 `classes` 的 gui 包目录（新版构建曾因缺少根目录 bundle 触发 `MissingResourceException`）。
+3. 打包：`jar --create --file HybridFileXfer.jar --main-class top.weixiansen574.hybridfilexfer.Main -C classes .`（beta5 为 155,161 字节）。
+4. 组装目录：jar、`start.exe`、adb 三件套（`adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll`）、Android APK（beta5 debug，6,231,483 字节）、bat 脚本、使用说明，共 13 个文件。
+5. 压缩：`HybridFileXfer-3.0.0-beta5-win-x64.zip`。
+6. 记录校验值：8,210,979 字节，SHA-256 `E1838ABE5EB8881A840B8E69D649D7BA8593DD103350EE849908C4891A59A5C4`。
+7. 冒烟：解压到干净目录 → `java -jar` 启动 → 观察 8s 进程存活、stderr 为空 → 结束并清理。
 8. 提交：中文提交信息，推送 `origin/feature/gui`，用 `git log --oneline` 复核提交号。
 
 ---
@@ -309,16 +358,18 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
   2. 对 `core`、`nio` 逐文件计算 SHA-256 并比对，必须全部一致；
   3. PC 独有与 Android 独有目录不参与比对，但涉及接口签名的改动需人工确认。
 - 建议在 CI 增加一步"core 哈希一致性检查"，阶段 2 落地。
-- 实现结果：beta4 打包前对 `core`、`nio` 逐文件比对，SHA-256 全部一致；CI 步骤尚未添加，仍靠人工检查。
+- 实现结果：beta5 打包前对 `core`、`nio` 逐文件比对，32 个共享文件 SHA-256 全部一致；CI 步骤尚未添加，仍靠人工检查。
 
 ---
 
 ## 9. 安全默认值
 
 - 手机端"允许电脑主动访问"默认**关闭**；未开启时所有客户端发起的请求返回 `ERR_PERMISSION`（已实现：菜单可勾选，实时生效）。
-- 首次连接时手机端弹出确认（可记住该电脑）——**尚未实现**，当前以全局开关代替；如后续需要按电脑记住授权，再补 IP 白名单。
+- 首次连接时手机端弹出确认（可勾选“记住这台电脑”）——**已实现（beta5，301）**：按电脑 UUID 记住允许/拒绝，菜单“已授权的电脑”可查看与撤销；电脑标识为持久 UUID + 主机名，换 IP 不影响判断。
+- 全局开关仍是最高优先级总闸：关闭时任何电脑（含已允许）都会被拒绝；旧 300 客户端没有授权帧，只受总闸约束。
+- 路径默认限制在外部存储根目录内，越界、`..`、符号链接/junction 逃逸均被拒绝；“允许访问全部存储”为显式开关，默认关闭。
 - 默认仅允许局域网访问；不自动开放公网。
-- 删除等破坏性操作在 GUI 中二次确认并提示“删除后不可恢复”（已实现）。
+- 删除等破坏性操作在 GUI 中二次确认并提示“删除后不可恢复”（已实现）；允许范围的根目录本身禁止删除。
 
 ---
 
@@ -334,6 +385,8 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 | 5（已完成） | 授权开关、i18n、配置持久化、打包与脚本修复、文档 | 发布候选 |
 
 最终 beta4 在阶段 5 基础上补齐了自绘窗口、深色主题、拖放推送、远端新建/删除与进度节流，已发布试运行包。
+
+beta5 在同一 301 工作流内顺序完成三项加固：握手阶段按电脑授权（4.7）、路径范围约束（4.8）与覆盖冲突询问（4.9）、心跳与传输失败原因（4.10）。三项均限定在 301，300 路径保持不变。
 
 ---
 
@@ -352,8 +405,12 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 11. 自绘窗口必须补齐拖动/双击/缩放/最大化边界，否则用户会明显感到“假窗口”。
 12. 主题初始化必须早于控件字段创建；否则深色模式会留下白底输入框/表格。
 13. 进度回调不能逐块刷 UI，必须聚合 + 节流 + 固定状态栏宽度，否则大文件必闪。
+14. 授权交换必须严格插在“版本确认之后、网卡协商之前”，否则两端会把授权字节误读成网卡数；服务端用 2s 超时兼容旧 301 客户端。
+15. `PathGuard` 在 Windows 必须走 `toRealPath`，只靠 `getCanonicalPath` 挡不住 junction；反射调用要以公开接口 `Path` 为目标类型。
+16. 传输改名是协议字段（`transferName`），两端 core 必须同步；只改一端会导致文件条目错位。
+17. 心跳只能在读线程直回 PING，走 handler 队列会被长任务拖到误判掉线。
 
-以上 1-4、6、7、11-13 已在 beta4 处理；5 已完成；8-10 仍作为后续注意事项。
+以上 1-4、6、7、11-17 已在 beta5 处理；5 已完成；8-10 仍作为后续注意事项。
 
 ---
 
@@ -365,6 +422,13 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 4. 两份 core 的共享文件哈希一致。
 
 验收结果（beta4）：以上 4 项均在模拟器 + Robot 实测通过；另完成大文件进度、窗口交互、深浅主题、拖放推送与远端新建/删除的回归。
+
+beta5 追加实测（真机 MGFVB20629003959 + Windows 本机）：
+
+- 授权：未知电脑弹框（名称 `DESKTOP-9BM38MT`、UUID `b8eba96e-…`），允许+记住后再次连接免询问；拒绝+记住后重连返回明确拒绝原因；“已授权的电脑”可撤销，撤销后列表清空。
+- 路径：`/sdcard/../data`、`/data` 被拒；`/sdcard/Download` 正常；`/data/local/tmp` 删除被拒；删除 `/sdcard` 提示“不能删除允许范围的根目录”；Windows junction 目录外文件被拒。
+- 心跳：静默 socket 探针在 20,042ms 收到“心跳超时，连接已断开”。
+- 改名拉取：`transferName` 生效，目标文件按新名落地。
 
 ---
 
@@ -379,15 +443,20 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 - **对话框尺寸**：自绘外壳补 `getPreferredSize()`，修复 `pack()` 后 0×0 不可见。
 - **文件选择器主题**：内嵌 `JFileChooser` 递归上色，不再出现深色对话框里白底列表。
 - **300 空闲探测**：无 RPC 读线程时用 1s 空闲探测判断断开，避免会话悬挂。
+- **握手授权缺失**：301 现已在握手阶段按电脑校验，未知电脑弹框、已拒绝电脑直接返回原因，不再是“连上后才报无权限”。
+- **路径越界**：`PathGuard` 统一拦截 `..`、绝对路径越界、符号链接/Windows junction 逃逸，并保护允许范围的根目录。
+- **Wi-Fi 掉线后假在线**：301 增加 5s/20s 心跳，读线程直回 PING，掉线约 20s 内复位界面。
+- **传输失败只有笼统文案**：`TransferException` 归类权限/路径/磁盘满/连接中断/IO，GUI 显示具体原因。
 
 ### 13.2 仍未做 / 已知限制
 
-- `start.exe` 仍只走 CLI 参数，不会拉起 GUI；GUI 需用 `启动图形界面.bat` 或无参 `java -jar`。是否让 `start.exe` 默认启动 GUI 待定。
+- `start.exe` 仍只走 CLI 参数，不会拉起 GUI；GUI 需用 `启动图形界面.bat` 或无参 `java -jar`。是否让 `start.exe` 默认启动 GUI 待定（上一轮相关改动被取消，尚未实现）。
 - `HybridFileXferLauncher` 未纳入发行包：本环境无 .NET SDK，无法构建；源码保留。
-- 手机端首次连接弹窗“记住该电脑”未实现，当前用全局“允许电脑主动访问”开关代替。
+- 301 授权对**旧 301 客户端**不生效：beta4 及更早的 301 客户端没有授权帧，服务端 2s 超时后按旧流程继续；按电脑授权需要两端同为 beta5 及以上。300 客户端同样只受全局总闸约束。
+- 目录冲突不提供重命名，只支持跳过/覆盖；需要改名请先手动改名后再推/拉。
 - 300 回退模式下主动浏览、新建、删除不可用，推送按钮也禁用；协议层仍可被动收发，需要主动功能必须升级手机端到 301。
 - 大目录仍一次性返回全量列表，没有分页或增量加载，目录特别大时浏览会卡顿。
 - 手机端删除是递归删除；超大目录可能超过 RPC 超时，界面会显示失败但手机端可能仍在继续执行。
-- 验证环境为 Android 模拟器 + 200% 缩放的 Windows 虚拟机，未在真机/100% DPI 上做最终走查；APK 仍为 beta debug 包。
+- 验证环境为 Android 真机（MGFVB20629003959，Android 10）与 Windows 本机；GUI 覆盖冲突弹窗已实现但未做完整人工走查，APK 仍为 beta debug 包。
 - PC 修改端口后，手机端也要改到同一端口；两端未做自动发现。
 - CI 尚未加入 core 哈希一致性检查，仍靠打包前人工比对。

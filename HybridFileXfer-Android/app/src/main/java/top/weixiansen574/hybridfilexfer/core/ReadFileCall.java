@@ -38,7 +38,7 @@ public abstract class ReadFileCall implements Callable<Void> {
                 if (!fileExists(file.getPath())) {
                     continue;
                 }
-                readToDeque(file);
+                readToDeque(file, true);
                 if (file.isDirectory()) {
                     listFilesAndRead(file);
                 }
@@ -60,7 +60,7 @@ public abstract class ReadFileCall implements Callable<Void> {
         List<RemoteFile> files = listFiles(folder.getPath());
         if (files != null) {
             for (RemoteFile file : files) {
-                readToDeque(file);
+                readToDeque(file, false);
                 if (file.isDirectory()) {
                     listFilesAndRead(file); // 递归遍历子文件夹
                 }
@@ -68,11 +68,13 @@ public abstract class ReadFileCall implements Callable<Void> {
         }
     }
 
-    private void readToDeque(RemoteFile file) throws Exception {
+    private void readToDeque(RemoteFile file, boolean allowRename) throws Exception {
         fileIndex++;
+        String targetPath = localDir.generateTransferPath(file.getPath(), remoteDir,
+                allowRename ? file.getTransferName() : null);
         if (file.isDirectory()) {
             deque.add(new FileBlock(false,
-                    fileIndex, localDir.generateTransferPath(file.getPath(), remoteDir),
+                    fileIndex, targetPath,
                     file.lastModified(), 0, 0, null));
             return;
         }
@@ -86,7 +88,7 @@ public abstract class ReadFileCall implements Callable<Void> {
             buffer.clear();
             buffer.limit(0);
             deque.add(new FileBlock(true,
-                    fileIndex, localDir.generateTransferPath(file.getPath(), remoteDir),
+                    fileIndex, targetPath,
                     lastModified, length, 0, buffer));
             closeFile();
             return;
@@ -101,7 +103,7 @@ public abstract class ReadFileCall implements Callable<Void> {
                 channel.read(buffer);
             }
             deque.add(new FileBlock(true,
-                    fileIndex, localDir.generateTransferPath(file.getPath(), remoteDir),
+                    fileIndex, targetPath,
                     lastModified, length, i, buffer));
             remaining -= blkSize;
             i++;

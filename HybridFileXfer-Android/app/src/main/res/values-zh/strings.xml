@@ -145,4 +145,20 @@
     <string name="controller_channel_ip">控制器通道IP</string>
     <string name="any_connectable_network_card_ip">任意可连接的网卡IP</string>
     <string name="home_dir">主目录</string>
+    <string name="pc_auth_title">电脑请求连接</string>
+    <string name="pc_auth_message">电脑「%1$s」\n标识：%2$s\n\n是否允许这台电脑访问手机文件？</string>
+    <string name="remember_pc">记住这台电脑（下次不再询问）</string>
+    <string name="pc_auth_allow">允许</string>
+    <string name="pc_auth_deny">拒绝</string>
+    <string name="pc_auth_manage_title">已授权的电脑</string>
+    <string name="pc_auth_empty">还没有记住的电脑。</string>
+    <string name="pc_authorized_item">%1$s\n标识：%2$s · 最后连接：%3$s</string>
+    <string name="pc_denied_item">%1$s（已拒绝）\n标识：%2$s · 最后连接：%3$s</string>
+    <string name="pc_auth_revoke_title">撤销记住的电脑</string>
+    <string name="pc_auth_revoke_message">确定移除「%1$s」的授权/拒绝记录吗？下次连接会重新询问。</string>
+    <string name="pc_auth_revoked">已移除</string>
+    <string name="auth_denied_toast">已拒绝 %1$s：%2$s</string>
+    <string name="allow_all_paths">允许访问全部存储（默认关闭）</string>
+    <string name="allow_all_paths_on">已允许访问全部存储</string>
+    <string name="allow_all_paths_off">已限制为默认根目录</string>
 </resources>
