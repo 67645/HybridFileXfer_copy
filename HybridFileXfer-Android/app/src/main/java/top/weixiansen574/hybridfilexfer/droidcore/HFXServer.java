@@ -157,7 +157,10 @@ public class HFXServer extends HFXService implements RpcFileOps {
                     continue;
                 }
                 ctChannel.writeBoolean(true);//版本正确匹配
-                if (versionCode == RpcProtocol.VERSION_RPC) {
+                boolean rpcMode = versionCode == RpcProtocol.VERSION_RPC;
+                if (rpcMode) {
+                    // 301：小包往返多，关闭 Nagle 避免与延迟确认叠加出约 40ms 固定延迟
+                    controlSocket.socket().setTcpNoDelay(true);
                     // 301：在网卡与缓冲协商之前校验电脑身份与授权
                     Integer authMagic = readIntWithTimeout(controlSocket, RpcProtocol.AUTH_LEGACY_GRACE_MS);
                     if (authMagic == null) {
@@ -203,7 +206,11 @@ public class HFXServer extends HFXService implements RpcFileOps {
                     String name = ctChannel.readUTF();
                     if (succeed) {
                         //accept通道
-                        accepted.add(new TransferConnection(name, new DataByteChannel(serverSocketChannel.accept())));
+                        SocketChannel transferSocket = serverSocketChannel.accept();
+                        if (rpcMode) {
+                            transferSocket.socket().setTcpNoDelay(true);
+                        }
+                        accepted.add(new TransferConnection(name, new DataByteChannel(transferSocket)));
                         ctChannel.writeBoolean(true);
                         anyAccepted = true;
                         callback.onAccepted(name);

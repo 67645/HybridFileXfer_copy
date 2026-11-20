@@ -108,7 +108,8 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
             //System.out.println("正在连接控制通道：" + serverControllerAddress);
             callback.onConnectingControlChannel(serverControllerAddress, serverPort);
             ctChannel = new DataByteChannel(connectChannel(
-                    new InetSocketAddress(serverControllerAddress, serverPort), null));
+                    new InetSocketAddress(serverControllerAddress, serverPort), null,
+                    version == RpcProtocol.VERSION_RPC));
 
             ctChannel.write(CLIENT_HEADER.getBytes(StandardCharsets.UTF_8));
             ctChannel.writeInt(version);
@@ -184,7 +185,9 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
                     return false;
                 }*/
                 try {
-                    SocketChannel socketChannel = connectChannel(new InetSocketAddress(inetAddress, serverPort), bindAddress);
+                    SocketChannel socketChannel = connectChannel(
+                            new InetSocketAddress(inetAddress, serverPort), bindAddress,
+                            version == RpcProtocol.VERSION_RPC);
                     connections.add(new TransferConnection(name, new DataByteChannel(socketChannel)));
                 } catch (IOException e) {
                     //该网卡不可达：只跳过这张网卡，其余可达网卡继续协商，避免整个会话卡死在等待连接
@@ -246,8 +249,10 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
      *
      * @param target      目标地址
      * @param bindAddress 本端需要绑定的网卡地址，可为 null
+     * @param noDelay     是否关闭 Nagle（301 启用，300 保持原行为）
      */
-    private static SocketChannel connectChannel(InetSocketAddress target, InetAddress bindAddress) throws IOException {
+    private static SocketChannel connectChannel(InetSocketAddress target, InetAddress bindAddress,
+                                                boolean noDelay) throws IOException {
         SocketChannel channel = SocketChannel.open();
         try {
             if (bindAddress != null) {
@@ -274,6 +279,10 @@ public abstract class HFXClient extends HFXService implements RpcFileOps {
                 }
             }
             channel.configureBlocking(true);
+            if (noDelay) {
+                // 301 的每文件请求/应答都是小包，Nagle 与延迟确认叠加会带来约 40ms 固定延迟
+                channel.socket().setTcpNoDelay(true);
+            }
             return channel;
         } catch (IOException e) {
             try {
