@@ -1,6 +1,6 @@
 # HybridFileXfer GUI 与双向协议实施设计
 
-> 状态：阶段 1-5 已实施完成；beta6 试运行包已发布（2026-11-20，新增小文件批量日志节流、start.exe 去掉 JDK 自动下载；Launcher 定案不发行）
+> 状态：阶段 1-5 已实施完成；beta7 试运行包已发布（2026-11-20，新增小文件批量推送与 TCP_NODELAY；构建/同步已脚本化）
 > 适用分支：`feature/gui`
 > 本文档保留改造前的基线事实（第 1 节），其余章节以最终实现为准；可复用的经验条目见 `docs/gui-experience-notes.md`。
 
@@ -144,7 +144,9 @@
   - 客户端进程 CPU 65.9s → 26.9s；
   - EDT 事件 47,030 → 8,102，日志插入 8,000 → 1；
   - 总耗时 228.1s → 224.9s（基本不变）。
-- 结论：UI/进度开销确实可观，已按上述方式削减；但它不在关键路径上，墙钟时间几乎不变。真正的瓶颈是“每文件一个 RPC 任务”：同样 4000 个文件改成单次批量请求后耗时 34.0s（1.84MiB/s），比逐文件快约 6.6 倍，差值折合每文件约 47.7ms。该值高度符合 TCP 延迟确认（约 40ms）与 Nagle 组合的特征，且代码中没有任何 `setTcpNoDelay`；属于协议层优化（批量推送或关闭 Nagle），本次未改，留作后续独立评估。
+- 结论：UI/进度开销确实可观，已按上述方式削减；但它不在关键路径上，墙钟时间几乎不变。真正的瓶颈是“每文件一个 RPC 任务”。
+- **TCP_NODELAY 复测（beta7，301，两端控制与传输通道均 `setTcpNoDelay(true)`）**：4000×16KB 229.8s、1000×64KB 58.0s、100×16KB 6.2s，与未加时持平，说明“Nagle + 延迟确认”的推断**不成立**；两端 CPU 都不高，是在等而不是算。新归因方向：adb forward 的中继 socket（不受应用层 NODELAY 控制）或多段小包的中转调度；需在真实 Wi-Fi 局域网复测才能排除本机链路，暂列为待验证项。
+- **批量推送（beta7）**：GUI 把同一父目录、单文件 ≤8MB 的普通文件合并为一次请求；单请求上限 100 个文件或 16MB，先到先分段（依据：实测约 8.7ms/文件，100 文件约 1-2 秒，失败影响面可控）；目录仍逐项递归，大文件仍单发；批量请求失败会自动退化为逐个重试，并用“推送 <文件名> 失败：原因”记录到具体文件。
 
 | 场景（模拟器 Android 14 x86_64） | 耗时 | 客户端 CPU | EDT 忙时间 | EDT 事件 | 日志插入 |
 |---|---|---|---|---|---|
@@ -154,10 +156,13 @@
 | 4000×16KB 逐文件（优化前） | 228.1s | 65.9s | 36.4s（16.0%） | 47,030 | 8,000 |
 | 4000×16KB 逐文件（优化后） | 224.9s | 26.9s | 5.0s（2.2%） | 8,102 | 1 |
 | 4000×16KB 单次批量 | 34.0s | 6.8s | 0.36s（1.1%） | 241 | 2 |
-| 1×62.5MB 单次批量 | 0.95s | — | — | — | — |
+| 4000×16KB GUI 批量（beta7） | 38.9s | 11.7s | 0.30s（0.8%） | 504 | 1 |
+| 1000×64KB GUI 批量（beta7） | 10.4s | 3.7s | 0.34s（3.2%） | 940 | 1 |
+| 1×62.5MB 单次批量 | 0.84s | — | — | — | — |
 
-- 服务端（手机）CPU：4000×16KB 逐文件约 20.6s（9.1%），单次批量约 13.6s（40.1%，分母是 34s）；批量模式下服务端占用率更高，但总 CPU 时间更少。
-- 1000×64KB 逐文件 56.3s、批量 8.6s，与 16KB 组合同样呈现“每文件约 48ms”的固定成本，说明瓶颈与文件大小无关，只与文件个数相关。
+- 服务端（手机）CPU：逐文件 4000×16KB 约 20.6s；GUI 批量约 13.0s（33.3%），与单次批量接近。
+- 每文件平均耗时：4000×16KB 由约 57.5ms 降到 9.7ms；1000×64KB 由约 58ms 降到 10.4ms（均含请求与写入），已接近单次批量基线的 8.7ms。
+- 失败路径实测：把 5 个文件推到 `/data/hfx_denied`，批量请求失败后退化为逐文件重试，407ms 内结束并产生 18 条日志（含每个文件的失败原因），不会卡死。
 
 ---
 
@@ -365,16 +370,17 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 6. `HybridFileXferLauncher`（C#）。**已决定不纳入发行**，源码保留在 `HybridFileXferLauncher/`。理由：Native AOT 在 Windows 上必须使用 MSVC 链接器（ILCompiler 的 `Microsoft.NETCore.Native.Windows.targets` 写死 `link.exe` + `/SUBSYSTEM` 等 MSVC 参数，MinGW 的 `ld` 无法链接），最小依赖也要安装 VS 2022 Build Tools 的 C++ x64 工具 + Windows SDK，约 2–3GB 下载、5–7GB 安装；而 Launcher 本身只有约 65KB，收益与成本不成比例。启动入口固定为 `start.exe`（CLI）与 `启动图形界面.bat`（GUI），不再重复讨论。
 7. `start.exe` 的自动下载 JDK 逻辑。**已移除（beta6）**：Dragonwell 21 实测压缩包 210,571,077 字节（200.8 MiB）、解压后 368,002,080 字节（351.0 MiB），与“体积最小”的目标冲突；现在检测不到 Java 时只给下载指引并退出，不联网。
 
-### 7.2 构建与发行流程（beta6 实际执行）
+### 7.2 构建与发行流程（beta7 实际执行）
 
-1. 编译：`javac --release 8 -encoding UTF-8 -cp <annotations桩> -d classes @sources.txt`。
-2. 资源：把 `messages.properties` 系列复制到 `classes` 根目录，`messages_gui.properties`、`messages_gui_zh_CN.properties` 复制到 `classes` 的 gui 包目录（新版构建曾因缺少根目录 bundle 触发 `MissingResourceException`）。
-3. 打包：`jar --create --file HybridFileXfer.jar --main-class top.weixiansen574.hybridfilexfer.Main -C classes .`（beta6 为 156,299 字节）。
-4. 组装目录：jar、`start.exe`（MinGW 重编译，20,480 字节）、adb 三件套（`adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll`）、Android APK（与 beta5 相同，6,231,483 字节）、bat 脚本、使用说明，共 13 个文件。
-5. 压缩：`HybridFileXfer-3.0.0-beta6-win-x64.zip`。
-6. 记录校验值：8,202,127 字节，SHA-256 `5452E1B264230DEEDBD57F928079A0A3BFDCBF60E9B4ACD712461F4B742E522E`。
-7. 冒烟：解压到干净目录 → `java -jar` 启动 → 观察 8s 进程存活、stderr 为空 → 结束并清理。
-8. 提交：中文提交信息，推送 `origin/feature/gui`，用 `git log --oneline` 复核提交号。
+1. 编译（已脚本化）：`pwsh -File script/build-pc.ps1`。脚本自动生成注解桩、编译 `HybridFileXfer-PC/src`、复制文案资源并打包，替代原先的手工命令。
+2. 资源：`messages.properties` 系列复制到 `classes` 根目录，`messages_gui*.properties` 复制到 gui 包目录（缺少根 bundle 会触发 `MissingResourceException`）。
+3. 打包：`HybridFileXfer.jar`（beta7 为 156,745 字节）。
+4. 组装目录：jar、`start.exe`（MinGW 重编译，20,480 字节）、adb 三件套、Android APK（beta7 debug，6,241,412 字节）、bat 脚本、使用说明，共 13 个文件。
+5. 压缩：`HybridFileXfer-3.0.0-beta7-win-x64.zip`。
+6. 记录校验值：8,202,981 字节，SHA-256 `74996F32F245B1FA6D484EDC0803A2BB29E781D19F8AD3A3F7D1D5B5333FD22F`。
+7. 冒烟：解压到干净目录 → `java -jar` 启动 → 观察进程存活、stderr 为空 → 结束并清理。
+8. core 同步：`pwsh -File script/check-core-sync.ps1` 必须输出 `CORE SYNC OK`。
+9. 提交：中文提交信息，推送 `origin/feature/gui`，用 `git log --oneline` 复核提交号。
 
 ---
 
@@ -484,7 +490,8 @@ beta5 追加实测（真机 MGFVB20629003959 + Windows 本机）：
 - 301 授权对**旧 301 客户端**不生效：beta4 及更早的 301 客户端没有授权帧，服务端 2s 超时后按旧流程继续；按电脑授权需要两端同为 beta5 及以上。300 客户端同样只受全局总闸约束。
 - 目录冲突不提供重命名，只支持跳过/覆盖；需要改名请先手动改名后再推/拉。
 - 300 回退模式下主动浏览、新建、删除不可用，推送按钮也禁用；协议层仍可被动收发，需要主动功能必须升级手机端到 301。
-- 大量小文件仍是“每文件一个 RPC 任务”，实测固定成本约 48ms/文件（4000×16KB 需约 225s，同等数据单次批量仅 34s）。疑为 Nagle + 延迟确认，代码中未设置 `setTcpNoDelay`；批量推送或关闭 Nagle 是后续优化方向，本次未实施。
+- 大量小文件的固定成本已通过 GUI 批量推送降到约 9.7ms/文件（4000×16KB 从约 225s 降到 38.9s）。TCP_NODELAY 已加但无改善，真实原因仍未定论；**待验证项**：在真实 Wi-Fi 局域网（不经过 adb forward 中转）复测同一场景，排除中转链路因素后再决定是否需要协议层改造。
+- 批量推送的代价：一次请求内的文件不再逐个重试，若中途失败会整批退化为逐个重试；单请求上限 100 文件/16MB，超大文件仍单发，避免长时间占用请求。
 - 大目录仍一次性返回全量列表，没有分页或增量加载，目录特别大时浏览会卡顿。
 - 手机端删除是递归删除；超大目录可能超过 RPC 超时，界面会显示失败但手机端可能仍在继续执行。
 - 验证环境：beta5 授权/路径/心跳用 Android 真机 MGFVB20629003959（Android 10，arm64）；beta6 小文件性能测试用模拟器 emulator-5556（Android 14，x86_64），两者都由 Windows 本机通过 adb 转发连接。GUI 覆盖冲突弹窗已实现但未做完整人工走查，APK 仍为 beta debug 包。

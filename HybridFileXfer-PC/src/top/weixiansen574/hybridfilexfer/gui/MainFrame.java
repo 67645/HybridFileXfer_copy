@@ -64,6 +64,7 @@ import java.io.File;
 import java.net.InetAddress;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -120,7 +121,14 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
     private int progressPercent = -1;
     /** 批量推送时聚合每文件完成日志，避免小文件刷屏，也减少 EDT 任务量。 */
     private PushLogSummary pushLogSummary;
+    /** 当前这次 pushFiles 请求包含的文件数，用于汇总统计（批量请求只回调一次 onComplete）。 */
+    private int pushCurrentFileCount = 1;
     private long lastPathStatusAt;
+
+    /** 批量推送上限：单文件超过 8MB、单次超过 100 个文件或 16MB 就拆分，控制失败影响面与单请求时长。 */
+    private static final long PUSH_BATCH_MAX_FILE_BYTES = 8L * 1024 * 1024;
+    private static final int PUSH_BATCH_MAX_FILES = 100;
+    private static final long PUSH_BATCH_MAX_BYTES = 16L * 1024 * 1024;
 
     /** 一次批量推送内累计的文件数、字节数与耗时（仅传输线程访问）。 */
     private static final class PushLogSummary {
@@ -1298,6 +1306,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
             PushLogSummary summary = files.size() > 20 ? new PushLogSummary() : null;
             boolean canceled = false;
             pushLogSummary = summary;
+            // 同一父目录下的小文件合并为一次请求；大文件与目录仍逐项提交
+            List<RemoteFile> group = new ArrayList<>();
+            String groupParent = null;
+            long groupBytes = 0;
             try {
                 for (File file : files) {
                     RemoteFile remoteFile = new RemoteFile(file);
@@ -1320,12 +1332,28 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                             }
                         }
                     }
-                    List<RemoteFile> remoteFiles = new ArrayList<>();
-                    remoteFiles.add(remoteFile);
-                    Directory local = new Directory(file.getParent(), Directory.getCurrentFileSystem());
-                    Directory remote = new Directory(targetPath, remoteFs);
-                    client.pushFiles(remoteFiles, local, remote, new GuiTransferCallback());
+                    boolean batchable = file.isFile() && file.length() <= PUSH_BATCH_MAX_FILE_BYTES;
+                    if (!batchable) {
+                        flushPushGroup(group, groupParent, targetPath, remoteFs);
+                        groupBytes = 0;
+                        groupParent = null;
+                        pushSingleFile(remoteFile, file.getParent(), targetPath, remoteFs);
+                        continue;
+                    }
+                    if (!group.isEmpty() && (!file.getParent().equals(groupParent)
+                            || group.size() >= PUSH_BATCH_MAX_FILES
+                            || groupBytes + file.length() > PUSH_BATCH_MAX_BYTES)) {
+                        flushPushGroup(group, groupParent, targetPath, remoteFs);
+                        groupBytes = 0;
+                        groupParent = null;
+                    }
+                    group.add(remoteFile);
+                    groupBytes += file.length();
+                    if (groupParent == null) {
+                        groupParent = file.getParent();
+                    }
                 }
+                flushPushGroup(group, groupParent, targetPath, remoteFs);
             } finally {
                 pushLogSummary = null;
             }
@@ -1335,6 +1363,36 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
             }
             return true;
         });
+    }
+
+    /** 提交一个分组；批量失败时退化为逐个重试，保证错误能定位到具体文件。 */
+    private void flushPushGroup(List<RemoteFile> group, String parent, String targetPath, int remoteFs) {
+        if (group.isEmpty()) {
+            return;
+        }
+        List<RemoteFile> batch = new ArrayList<>(group);
+        group.clear();
+        pushCurrentFileCount = batch.size();
+        try {
+            client.pushFiles(batch, new Directory(parent, Directory.getCurrentFileSystem()),
+                    new Directory(targetPath, remoteFs), new GuiTransferCallback());
+        } catch (Exception e) {
+            uiLog(GuiStrings.get("pushBatchFallback", batch.size(), String.valueOf(e.getMessage())));
+            for (RemoteFile remoteFile : batch) {
+                pushSingleFile(remoteFile, parent, targetPath, remoteFs);
+            }
+        }
+    }
+
+    private void pushSingleFile(RemoteFile remoteFile, String parent, String targetPath, int remoteFs) {
+        pushCurrentFileCount = 1;
+        try {
+            client.pushFiles(Collections.singletonList(remoteFile),
+                    new Directory(parent, Directory.getCurrentFileSystem()),
+                    new Directory(targetPath, remoteFs), new GuiTransferCallback());
+        } catch (Exception e) {
+            uiLog(GuiStrings.get("pushFileFailed", remoteFile.getName(), String.valueOf(e.getMessage())));
+        }
     }
 
     private static final int CONFLICT_SKIP = 0;
@@ -1635,7 +1693,7 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
         public void onComplete(boolean isUpload, long traffic, long time) {
             PushLogSummary summary = pushLogSummary;
             if (summary != null && isUpload) {
-                summary.files++;
+                summary.files += pushCurrentFileCount;
                 summary.bytes += traffic;
                 summary.time += time;
                 return;
