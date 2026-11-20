@@ -95,16 +95,6 @@ public abstract class WriteFileCall implements Callable<Void> {
         return null;
     }
 
-    private void logSeek(FileBlock block) {
-        System.out.printf("seek: %d %s %d %d %d%n",
-                block.getStartPosition(), block.path, block.totalSize, block.index, block.getLength());
-    }
-
-    private void logBlock(FileBlock block) {
-        System.out.printf("%s %d %d %d%n",
-                block.path, block.totalSize, block.index, block.getLength());
-    }
-
     public ByteBuffer getBuffer() throws InterruptedException {
         return buffers.take();
     }
@@ -188,9 +178,8 @@ public abstract class WriteFileCall implements Callable<Void> {
     }
 
     private void setLastModified(String file, long time) throws Exception {
-        if (!setFileLastModified(file,time)) {
-            System.out.println("Warning! file cannot set last modified:" + file);
-        }
+        // 部分文件系统不允许修改时间，失败不影响文件内容，静默忽略即可
+        setFileLastModified(file, time);
     }
 
     protected abstract void createParentDirIfNotExists(String path) throws Exception;
