@@ -118,6 +118,16 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
     private final java.util.LinkedHashMap<String, Long> progressTotal = new java.util.LinkedHashMap<>();
     private String progressPath;
     private int progressPercent = -1;
+    /** 批量推送时聚合每文件完成日志，避免小文件刷屏，也减少 EDT 任务量。 */
+    private PushLogSummary pushLogSummary;
+    private long lastPathStatusAt;
+
+    /** 一次批量推送内累计的文件数、字节数与耗时（仅传输线程访问）。 */
+    private static final class PushLogSummary {
+        long files;
+        long bytes;
+        long time;
+    }
     private javax.swing.Timer progressTimer;
     /** 速度表当前展示的通道名，用于原地更新单元格而不清空重建。 */
     private final List<String> speedChannels = new ArrayList<>();
@@ -1284,31 +1294,44 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
                 }
                 replaceAll = bulk == 0;
             }
-            for (File file : files) {
-                RemoteFile remoteFile = new RemoteFile(file);
-                if (existing.contains(file.getName())) {
-                    if (conflicts.size() > 1) {
-                        if (!replaceAll) {
-                            continue;
-                        }
-                    } else {
-                        ConflictChoice choice = askConflictBlocking(file.getName(), !file.isDirectory());
-                        if (choice.action == CONFLICT_SKIP) {
-                            continue;
-                        }
-                        if (choice.action == CONFLICT_CANCEL) {
-                            return true;
-                        }
-                        if (choice.action == CONFLICT_RENAME) {
-                            remoteFile = new RemoteFile(file, choice.newName);
+            // 文件较多时聚合每文件完成日志，避免刷屏和大量 EDT 重排；错误仍逐条记录
+            PushLogSummary summary = files.size() > 20 ? new PushLogSummary() : null;
+            boolean canceled = false;
+            pushLogSummary = summary;
+            try {
+                for (File file : files) {
+                    RemoteFile remoteFile = new RemoteFile(file);
+                    if (existing.contains(file.getName())) {
+                        if (conflicts.size() > 1) {
+                            if (!replaceAll) {
+                                continue;
+                            }
+                        } else {
+                            ConflictChoice choice = askConflictBlocking(file.getName(), !file.isDirectory());
+                            if (choice.action == CONFLICT_SKIP) {
+                                continue;
+                            }
+                            if (choice.action == CONFLICT_CANCEL) {
+                                canceled = true;
+                                break;
+                            }
+                            if (choice.action == CONFLICT_RENAME) {
+                                remoteFile = new RemoteFile(file, choice.newName);
+                            }
                         }
                     }
+                    List<RemoteFile> remoteFiles = new ArrayList<>();
+                    remoteFiles.add(remoteFile);
+                    Directory local = new Directory(file.getParent(), Directory.getCurrentFileSystem());
+                    Directory remote = new Directory(targetPath, remoteFs);
+                    client.pushFiles(remoteFiles, local, remote, new GuiTransferCallback());
                 }
-                List<RemoteFile> remoteFiles = new ArrayList<>();
-                remoteFiles.add(remoteFile);
-                Directory local = new Directory(file.getParent(), Directory.getCurrentFileSystem());
-                Directory remote = new Directory(targetPath, remoteFs);
-                client.pushFiles(remoteFiles, local, remote, new GuiTransferCallback());
+            } finally {
+                pushLogSummary = null;
+            }
+            if (!canceled && summary != null && summary.files > 0) {
+                uiLog(GuiStrings.get("pushBatchComplete", summary.files,
+                        Utils.formatFileSize(summary.bytes), Utils.formatTime(summary.time)));
             }
             return true;
         });
@@ -1586,6 +1609,10 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
 
         @Override
         public void onChannelComplete(String iName, long traffic, long time) {
+            // 批量推送时每个文件都会结束一次通道，逐条记录只会刷屏，汇总日志已包含总时长
+            if (pushLogSummary != null) {
+                return;
+            }
             uiLog(GuiStrings.get("channelDone", iName, Utils.formatTime(time)));
         }
 
@@ -1606,6 +1633,13 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
 
         @Override
         public void onComplete(boolean isUpload, long traffic, long time) {
+            PushLogSummary summary = pushLogSummary;
+            if (summary != null && isUpload) {
+                summary.files++;
+                summary.bytes += traffic;
+                summary.time += time;
+                return;
+            }
             uiLog(GuiStrings.get(isUpload ? "sendComplete" : "receiveComplete",
                     Utils.formatFileSize(traffic), Utils.formatTime(time)));
             // 主动推送/拉取由队列任务统一收尾；被动传输在这里结束。
@@ -1663,8 +1697,13 @@ public class MainFrame extends JFrame implements WindowChrome.Host {
             progressPath = path;
         }
         if (pathChanged) {
-            String text = GuiStrings.get("statusTransferPath", path);
-            uiLater(() -> setStatus(text));
+            // 大量小文件时每次切换都发状态会制造成百上千个 EDT 任务，限制为最多 10 次/秒
+            long now = System.currentTimeMillis();
+            if (now - lastPathStatusAt >= 100) {
+                lastPathStatusAt = now;
+                String text = GuiStrings.get("statusTransferPath", path);
+                uiLater(() -> setStatus(text));
+            }
         }
     }
 

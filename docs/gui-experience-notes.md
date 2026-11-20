@@ -21,15 +21,18 @@
 
 ### 1.3 用 MinGW 编译 start.exe
 
-- 正确命令：`gcc -O2 -o start.exe start.c -lurlmon`，漏掉 `-lurlmon` 会在链接阶段报 `URLDownloadToFile` 未定义。
+- 正确命令：`gcc -O2 -s -finput-charset=UTF-8 -fexec-charset=UTF-8 -o start.exe start.c`。beta6 起已移除下载逻辑，不需要 `-lurlmon`。
 - 坑：把 `%MinGW_HOME%\bin` 原样写进 PATH（例如通过脚本/进程环境注入）时，变量没有被展开，`gcc` 会提示“不是内部或外部命令”。改用绝对路径，或在 cmd 里先 `call` 展开，或直接用 `C:\...\mingw64\bin\gcc.exe` 全路径调用。
-- 源文件里的中文在 MinGW 下要确认执行字符集；`start.c` 已用 `#pragma execution_character_set("utf-8")`（仅 MSVC 生效），MinGW 编译后仍要实际运行看中文是否乱码。
+- 源文件里的中文在 MinGW 下要确认执行字符集；`start.c` 已用 `#pragma execution_character_set("utf-8")`（仅 MSVC 生效），MinGW 编译后仍要实际运行看中文是否乱码（运行时已 `SetConsoleOutputCP(CP_UTF8)`）。
 - `start.exe` 只认当前工作目录的 `HybridFileXfer.jar`；从别的目录启动会提示找不到 jar。发行包里必须把两者放在同一层。
+- 查找同目录 JDK 时注意：`FindFirstFileA("jdk*\\bin\\java.exe")` 不生效——Windows 的查找接口不支持目录段通配符。正确做法是先 `FindFirstFileA("jdk*")` 枚举目录，再拼 `目录\bin\java.exe` 检查是否存在。
+- `start.exe` 不再自动下载 JDK：Dragonwell 21 包 200.8MiB、解压 351MiB，代价过大；无 Java 时只输出下载指引并返回 1。验证三条路径：系统 Java、同目录 JDK、两者都没有（需要临时清空 PATH）。
 
-### 1.4 Launcher 需要 .NET SDK
+### 1.4 Launcher：已决定不使用 Native AOT
 
-- `HybridFileXferLauncher` 是 C# 工程，构建前用 `dotnet --list-sdks` 确认 SDK 是否存在；只有 Runtime 不够。
-- 本环境没有 .NET SDK，因此 Launcher 未构建、未纳入发行包；发行说明中要写清楚，避免用户以为漏文件。
+- `HybridFileXferLauncher` 是 C# 工程，`net9.0` + `PublishAot`。用 .NET 11 SDK 可以还原并编译到 IL，但链接阶段必须有 MSVC：`Microsoft.NETCore.Native.Windows.targets` 固定调用 `link.exe`，参数是 `/SUBSYSTEM`、`/ENTRY`、`/NODEFAULTLIB` 等，输入是 `.lib`；`findvcvarsall.bat` 也只会通过 `vswhere` 找 VS。
+- 实测把 `CppLinker` 指向 MinGW 的 `ld.exe`（配合 `IlcUseEnvironmentalTools=true`）会直接失败：`cannot find ole32.lib`、`cannot find /NOLOGO`……因此 MinGW 不能替代 MSVC。
+- 最小可用工具链是 VS 2022 Build Tools 的 `VC.Tools.x86.x64` + Windows SDK，约 2–3GB 下载、5–7GB 安装。**已决定不为一款 65KB 的启动器承担这份安装成本**，Launcher 不纳入发行；启动入口固定为 `start.exe` 与 `启动图形界面.bat`，源码保留但不再讨论。
 
 ### 1.5 PowerShell 下的几个命令行坑
 
@@ -209,6 +212,26 @@ beta5 起 `ERR_PERMISSION` 的 body 带服务端原因（路径越界、不能�
 - 目录冲突不提供重命名，只给跳过/覆盖；这是刻意的取舍，不是遗漏。
 - `ThemedDialog.choice` 返回按钮下标，取消返回 -1；后台线程弹框要用 `invokeAndWait`，否则对话框可能在错误线程创建。
 - 重命名输入校验与新建文件夹一致：非空、非 `.`/`..`、不含路径分隔符。
+
+### 3.10 小文件推送：先量化，再决定改不改
+
+- 测量方法（可复用）：
+  - 用自定义 `EventQueue` 覆写 `dispatchEvent`，累计 EDT 忙时间与事件数；`postEvent` 统计投递数。
+  - 给队列模型加 `TableModelListener`、给进度条加 `ChangeListener`、给日志文档加 `DocumentListener`，分别统计更新次数。
+  - 客户端 CPU 用 `com.sun.management.OperatingSystemMXBean#getProcessCpuTime`；手机 CPU 用 `adb shell cat /proc/<pid>/stat` 的 utime+stime（100Hz，约 10ms/tick）。
+  - 文件集设计成“总字节相同、文件个数不同”（4000×16KB vs 1000×64KB vs 1×62.5MB），才能把“每文件固定成本”从吞吐里分离出来。
+- 结果（模拟器 Android 14 x86_64）：
+  - UI 开销真实存在：4000 文件逐文件推送时 EDT 忙 36.4s（占墙钟 16%），客户端 CPU 65.9s。
+  - 但 UI 不在关键路径：优化后 EDT 忙降到 5.0s（2.2%）、客户端 CPU 降到 26.9s，墙钟只从 228.1s 变到 224.9s。
+  - 真正的瓶颈是“每文件一个 RPC 任务”：同样数据单次批量只需 34.0s（约 6.6 倍差距），折合每文件约 48ms；1000×64KB 也是每文件约 56ms，说明与文件大小无关。
+  - 48ms 高度符合 Nagle + 延迟确认（约 40ms）的特征，代码里没有任何 `setTcpNoDelay`。后续要提速，应做批量推送或关闭 Nagle，而不是继续削减 UI。
+- 具体改法（beta6）：
+  - 文件数 > 20 时，`onComplete` 只累计、不写日志，`onChannelComplete` 直接跳过，循环结束写一条汇总；≤20 个文件保持逐条日志。
+  - 状态文字切换加 100ms 节流（最多 10 次/秒），错误日志不受影响。
+- 测量时的坑：
+  - `adb shell ps -A | Select-String 包名` 的输出行有前导空格，按 `\s+` 分割后 `[1]` 才是 PID，`[2]` 是 PPID；一开始取错，导致手机 CPU 恒为 0。
+  - 批量模式（直接调 `client.pushFiles`）不会产生队列行，等待“队列完成”会一直卡住；同步调用返回即完成。
+  - 控制台输出中文可能因编码显示成乱码，但 JVM 内部的字符串仍正确，按中文匹配状态不受影响；需要在报告里引用时以日志文件为准。
 
 ---
 

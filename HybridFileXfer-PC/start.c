@@ -2,13 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
-#include <urlmon.h>
 #include <ctype.h>
 #ifdef _MSC_VER
-#pragma comment(lib, "urlmon.lib")
 #pragma execution_character_set("utf-8")//设置字符集为utf-8（仅 MSVC）
 #endif
-// MinGW 下请使用：gcc -O2 -o start.exe start.c -lurlmon
+// MinGW 下请使用：gcc -O2 -s -o start.exe start.c
 
 // 验证 IP 地址是否合法
 int is_valid_ip(const char *ip_addr) {
@@ -59,6 +57,40 @@ int is_valid_device_id(const char *device_id) {
     return 1;
 }
 
+// 在程序目录下查找可用的 JDK：已知的 Dragonwell 目录名，以及 jdk*/dragonwell*/java* 目录
+int find_local_java(char *out, size_t out_size) {
+    const char *known = "dragonwell-21.0.5.0.5+9-GA\\bin\\java.exe";
+    if (GetFileAttributes(known) != INVALID_FILE_ATTRIBUTES) {
+        snprintf(out, out_size, "%s", known);
+        return 1;
+    }
+
+    // FindFirstFile 的目录部分不支持通配符，先枚举目录，再拼 bin\java.exe 检查
+    const char *patterns[] = {"jdk*", "dragonwell*", "java*"};
+    for (int i = 0; i < 3; i++) {
+        WIN32_FIND_DATAA data;
+        HANDLE handle = FindFirstFileA(patterns[i], &data);
+        if (handle == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        do {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+                || strcmp(data.cFileName, ".") == 0 || strcmp(data.cFileName, "..") == 0) {
+                continue;
+            }
+            char candidate[512];
+            snprintf(candidate, sizeof(candidate), "%s\\bin\\java.exe", data.cFileName);
+            if (GetFileAttributes(candidate) != INVALID_FILE_ATTRIBUTES) {
+                snprintf(out, out_size, "%s", candidate);
+                FindClose(handle);
+                return 1;
+            }
+        } while (FindNextFileA(handle, &data));
+        FindClose(handle);
+    }
+    return 0;
+}
+
 int main() {
     // 设置控制台代码页为 UTF-8，确保 C 输出的中文不乱码
     SetConsoleOutputCP(CP_UTF8);
@@ -66,81 +98,36 @@ int main() {
     // 关闭标准输出缓冲，保证重定向/管道下提示语与 Java 输出的顺序正确
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    // JDK 文件的目录和名称
-    char jdk_directory[] = "dragonwell-21.0.5.0.5+9-GA";
-    char jdk_zip_file[] = "dragonwell_jdk.zip";
-    char jdk_url[] = "https://dragonwell.oss-cn-shanghai.aliyuncs.com/21.0.5.0.5%2B9/Alibaba_Dragonwell_Extended_21.0.5.0.5.9_x64_windows.zip";
-    char temp_directory[] = "temp_jdk_extract";
-    
     int use_system_java = 0;//用于判断是否使用系统java
+    char java_cmd[600];     //java 启动命令（系统 java 或同目录 JDK 的完整路径）
+    char local_java[512];
 
-    // 检查 Java 环境
+    // 检查 Java 环境：优先系统 Java，其次程序目录下已有的 JDK；不再自动下载
     printf("正在检查系统Java环境...\n");
     if (system("java -version > nul 2>&1") == 0) {
         use_system_java = 1;
+        snprintf(java_cmd, sizeof(java_cmd), "java");
         printf("检测到系统Java，将使用系统Java执行。\n");
     } else {
-        printf("未检测到系统Java，正在检查内置JDK...\n");
-        
-        if (GetFileAttributes(jdk_directory) == INVALID_FILE_ATTRIBUTES) {
-            printf("JDK 文件不存在，正在下载...\n");
-            // 下载 JDK 压缩文件
-            HRESULT hr = URLDownloadToFile(NULL, jdk_url, jdk_zip_file, 0, NULL);
-            if (SUCCEEDED(hr)) {
-                printf("JDK 文件下载完成：%s\n", jdk_zip_file);
-
-                // 解压缩 JDK 文件到一个临时目录
-                printf("正在解压 JDK 文件...\n");
-                char unzip_command[512];
-                snprintf(unzip_command, sizeof(unzip_command), "powershell -Command \"Expand-Archive -Path %s -DestinationPath %s\"", jdk_zip_file, temp_directory);
-                int result = system(unzip_command);
-
-                if (result == 0) {
-                    printf("JDK 文件解压缩完成。\n");
-                    
-                    // 将解压后的目录重命名为目标目录
-                    printf("正在移动 JDK 文件到正确位置...\n");
-                    snprintf(unzip_command, sizeof(unzip_command), "move %s\\dragonwell-21.0.5.0.5+9-GA %s", temp_directory, jdk_directory);
-                    result = system(unzip_command);
-
-                    if (result != 0) {
-                        printf("移动 JDK 文件失败，请检查系统权限和文件结构。\n");
-                        printf("按任意键退出...\n");
-                        getchar();
-                        return 1;
-                    }
-
-                    // 删除临时解压目录
-                    snprintf(unzip_command, sizeof(unzip_command), "rmdir /s /q %s", temp_directory);
-                    result = system(unzip_command);
-                    if (result != 0) {
-                        printf("删除临时目录失败，请手动清理目录：%s\n", temp_directory);
-                    }
-
-                    // 删除压缩文件
-                    remove(jdk_zip_file);
-                } else {
-                    printf("解压缩失败，请检查系统是否安装了 PowerShell 或 tar 工具。\n");
-                    printf("按任意键退出...\n");
-                    getchar();
-                    return 1;
-                }
-            } else {
-                //错误处理
-                printf("下载失败，错误代码: 0x%08X\n请检查网络连接或下载链接是否正确。\n", (unsigned int) hr);
-                printf("下载链接: %s\n", jdk_url);
-                printf("目标文件: %s\n", jdk_zip_file);
-				printf("可手动下载文件并将其放置在“dragonwell-21.0.5.0.5+9-GA”目录。\n");
-                printf("按任意键退出...\n");
-                getchar();
-                return 1;
-            }
+        printf("未检测到系统Java，正在检查程序目录下的JDK...\n");
+        if (find_local_java(local_java, sizeof(local_java))) {
+            snprintf(java_cmd, sizeof(java_cmd), "\"%s\"", local_java);
+            printf("检测到程序目录下的JDK：%s\n", local_java);
         } else {
-            printf("内置JDK已存在。\n");
+            printf("\n未找到可用的 Java 运行环境。\n");
+            printf("HybridFileXfer 需要 Java 17 或更高版本（推荐 Java 21）。\n\n");
+            printf("请任选一种方式处理后重新运行 start.exe：\n");
+            printf("  1. 安装 JDK 21：https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk\n");
+            printf("     安装时勾选“Add to PATH”，然后在新的命令行窗口执行 java -version 确认；\n");
+            printf("  2. 或下载 JDK 压缩包，解压后把整个 JDK 目录放到 start.exe 同目录，\n");
+            printf("     目录名以 jdk 或 dragonwell 开头（例如 jdk-21.0.5），程序会自动识别。\n\n");
+            printf("说明：为避免下载上百 MB 的运行时，程序不会自动下载 JDK。\n");
+            printf("按任意键退出...\n");
+            getchar();
+            return 1;
         }
     }
 
-    
     // jar 与 start.exe 必须在同一工作目录，否则下面的 java -jar 会直接失败
     if (GetFileAttributes("HybridFileXfer.jar") == INVALID_FILE_ATTRIBUTES) {
         printf("未找到 HybridFileXfer.jar。\n");
@@ -159,14 +146,12 @@ int main() {
     char wireless_ip_addr[256] = "";
     char device_id[256] = "none";
     char wireless_choice[10];
+    char target_args[512];
 
     printf("请输入 '1' 使用无线模式，直接回车将使用有线模式：");
     fgets(wireless_choice, sizeof(wireless_choice), stdin);
     wireless_choice[strcspn(wireless_choice, "\n")] = 0;
 
-    char command[512];
-
-    //构建Java命令
     if (strcmp(wireless_choice, "1") == 0) {
         printf("请输入无线设备的 IP 地址：");
         fgets(wireless_ip_addr, sizeof(wireless_ip_addr), stdin);
@@ -178,16 +163,7 @@ int main() {
             getchar();
             return 1;
         }
-
-        if (use_system_java) {
-            snprintf(command, sizeof(command), 
-                "java -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c %s", 
-                wireless_ip_addr);
-        } else {
-            snprintf(command, sizeof(command), 
-                ".\\%s\\bin\\java.exe -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c %s", 
-                jdk_directory, wireless_ip_addr);
-        }
+        snprintf(target_args, sizeof(target_args), "-c %s", wireless_ip_addr);
     } else {
         printf("请输入设备 ID (如果留空，默认使用 -c adb 模式)：");
         fgets(device_id, sizeof(device_id), stdin);
@@ -200,29 +176,18 @@ int main() {
             getchar();
             return 1;
         }
-
         if (strlen(device_id) == 0 || strcmp(device_id, "none") == 0) {
-            if (use_system_java) {
-                snprintf(command, sizeof(command), 
-                    "java -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c adb");
-            } else {
-                snprintf(command, sizeof(command), 
-                    ".\\%s\\bin\\java.exe -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c adb", 
-                    jdk_directory);
-            }
+            snprintf(target_args, sizeof(target_args), "-c adb");
         } else {
-            if (use_system_java) {
-                snprintf(command, sizeof(command), 
-                    "java -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c adb -s %s", 
-                    device_id);
-            } else {
-                snprintf(command, sizeof(command), 
-                    ".\\%s\\bin\\java.exe -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar -c adb -s %s", 
-                    jdk_directory, device_id);
-            }
+            snprintf(target_args, sizeof(target_args), "-c adb -s %s", device_id);
         }
     }
-    //启动java
+
+    // 启动 java
+    char command[1024];
+    snprintf(command, sizeof(command),
+             "%s -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar HybridFileXfer.jar %s",
+             java_cmd, target_args);
     int result = system(command);
 
     if (result != 0) {

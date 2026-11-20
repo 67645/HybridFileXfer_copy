@@ -1,6 +1,6 @@
 # HybridFileXfer GUI 与双向协议实施设计
 
-> 状态：阶段 1-5 已实施完成；beta5 试运行包已发布（2026-11-20，新增握手授权、路径范围约束、断线检测与失败原因）
+> 状态：阶段 1-5 已实施完成；beta6 试运行包已发布（2026-11-20，新增小文件批量日志节流、start.exe 去掉 JDK 自动下载；Launcher 定案不发行）
 > 适用分支：`feature/gui`
 > 本文档保留改造前的基线事实（第 1 节），其余章节以最终实现为准；可复用的经验条目见 `docs/gui-experience-notes.md`。
 
@@ -131,6 +131,33 @@
 - 状态标签固定 300px 宽，路径只在切换文件时更新；速度每秒更新，避免文字宽度挤动进度条。
 - 通道速度表按通道名原地更新单元格，不再每秒清空重建。
 - 实测 512MB 单文件：进度回退 0 次，刷新约 9.5 次/秒（修复前约 15.2 次/秒的逐块刷新）。
+
+### 3.8 小文件批量推送的日志与状态节流（beta6）
+
+- 问题：推送循环原本对每个文件调用一次 `pushFiles`，每个文件都记录“发送完成”和“通道完成”各一行，并切换一次状态文字。4000 个 16KB 文件会产生 8000 次日志插入和大量 EDT 任务。
+- 改法：
+  - 文件数 > 20 时启用汇总：`onComplete` 只累计文件数/字节/耗时，`onChannelComplete` 直接跳过；循环结束后写一条“已推送 N 个文件，共 X，用时 Y”。
+  - 状态文字切换限制为最多 10 次/秒（`lastPathStatusAt` 100ms 节流），避免每文件一个 EDT 任务；错误仍逐条记录。
+  - 单文件或少量文件（≤20）保持原有逐条日志，不改变用户习惯。
+- 实测（模拟器 Android 14 x86_64，4000×16KB，共 62.5MiB）：
+  - EDT 忙时间 36.4s → 5.0s（占墙钟 16.0% → 2.2%）；
+  - 客户端进程 CPU 65.9s → 26.9s；
+  - EDT 事件 47,030 → 8,102，日志插入 8,000 → 1；
+  - 总耗时 228.1s → 224.9s（基本不变）。
+- 结论：UI/进度开销确实可观，已按上述方式削减；但它不在关键路径上，墙钟时间几乎不变。真正的瓶颈是“每文件一个 RPC 任务”：同样 4000 个文件改成单次批量请求后耗时 34.0s（1.84MiB/s），比逐文件快约 6.6 倍，差值折合每文件约 47.7ms。该值高度符合 TCP 延迟确认（约 40ms）与 Nagle 组合的特征，且代码中没有任何 `setTcpNoDelay`；属于协议层优化（批量推送或关闭 Nagle），本次未改，留作后续独立评估。
+
+| 场景（模拟器 Android 14 x86_64） | 耗时 | 客户端 CPU | EDT 忙时间 | EDT 事件 | 日志插入 |
+|---|---|---|---|---|---|
+| 100×16KB 逐文件（优化前） | 6.02s | 3.28s | 1.54s（25.5%） | 1,069 | 200 |
+| 100×16KB 逐文件（优化后） | 5.82s | 0.80s | 0.21s（3.6%） | 172 | 1 |
+| 100×16KB 单次批量 | 0.92s | 0.52s | — | 13 | 2 |
+| 4000×16KB 逐文件（优化前） | 228.1s | 65.9s | 36.4s（16.0%） | 47,030 | 8,000 |
+| 4000×16KB 逐文件（优化后） | 224.9s | 26.9s | 5.0s（2.2%） | 8,102 | 1 |
+| 4000×16KB 单次批量 | 34.0s | 6.8s | 0.36s（1.1%） | 241 | 2 |
+| 1×62.5MB 单次批量 | 0.95s | — | — | — | — |
+
+- 服务端（手机）CPU：4000×16KB 逐文件约 20.6s（9.1%），单次批量约 13.6s（40.1%，分母是 34s）；批量模式下服务端占用率更高，但总 CPU 时间更少。
+- 1000×64KB 逐文件 56.3s、批量 8.6s，与 16KB 组合同样呈现“每文件约 48ms”的固定成本，说明瓶颈与文件大小无关，只与文件个数相关。
 
 ---
 
@@ -333,18 +360,19 @@ GUI 的“新建文件夹/删除”直接使用 2、3，不额外加命令；`QU
 1. artifact 产物统一命名为 `HybridFileXfer.jar`。**已完成**：beta4 的 jar 为 140,503 字节。
 2. `start-by-adb.bat`、`start-by-network.bat` 的 `-D...` 参数移到 `-jar` 之前。**已完成**。
 3. 帮助文案与 README 的 `--device` 问题。**已完成**：代码同时接受 `--switch-device` 与 `--device`。
-4. `start.exe` 统一入口。**部分完成**：启动前会检查同目录 `HybridFileXfer.jar`，可选择系统 Java 或内置 JDK；但仍只拼 CLI 参数，不拉起 GUI。发行包用 `启动图形界面.bat` 启动 GUI。
+4. `start.exe` 统一入口。**已完成（beta6 调整）**：启动前检查同目录 `HybridFileXfer.jar`；优先使用系统 Java，其次使用程序目录下已有的 JDK（目录名以 `jdk`/`dragonwell`/`java` 开头且含 `bin\java.exe`）；两者都没有时**不再自动下载 JDK**，而是打印安装指引并退出。仍只拼 CLI 参数，不拉起 GUI；GUI 用 `启动图形界面.bat`。
 5. artifact 配置中的 `HybirdFileXfer.jar` 笔误。**无对应文件**：本仓库副本不含 `.idea/artifacts`。
-6. `HybridFileXferLauncher`（C#）。**未纳入发行包**：本环境缺少 .NET SDK，无法构建；源码保留。
+6. `HybridFileXferLauncher`（C#）。**已决定不纳入发行**，源码保留在 `HybridFileXferLauncher/`。理由：Native AOT 在 Windows 上必须使用 MSVC 链接器（ILCompiler 的 `Microsoft.NETCore.Native.Windows.targets` 写死 `link.exe` + `/SUBSYSTEM` 等 MSVC 参数，MinGW 的 `ld` 无法链接），最小依赖也要安装 VS 2022 Build Tools 的 C++ x64 工具 + Windows SDK，约 2–3GB 下载、5–7GB 安装；而 Launcher 本身只有约 65KB，收益与成本不成比例。启动入口固定为 `start.exe`（CLI）与 `启动图形界面.bat`（GUI），不再重复讨论。
+7. `start.exe` 的自动下载 JDK 逻辑。**已移除（beta6）**：Dragonwell 21 实测压缩包 210,571,077 字节（200.8 MiB）、解压后 368,002,080 字节（351.0 MiB），与“体积最小”的目标冲突；现在检测不到 Java 时只给下载指引并退出，不联网。
 
-### 7.2 构建与发行流程（beta5 实际执行）
+### 7.2 构建与发行流程（beta6 实际执行）
 
 1. 编译：`javac --release 8 -encoding UTF-8 -cp <annotations桩> -d classes @sources.txt`。
 2. 资源：把 `messages.properties` 系列复制到 `classes` 根目录，`messages_gui.properties`、`messages_gui_zh_CN.properties` 复制到 `classes` 的 gui 包目录（新版构建曾因缺少根目录 bundle 触发 `MissingResourceException`）。
-3. 打包：`jar --create --file HybridFileXfer.jar --main-class top.weixiansen574.hybridfilexfer.Main -C classes .`（beta5 为 155,161 字节）。
-4. 组装目录：jar、`start.exe`、adb 三件套（`adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll`）、Android APK（beta5 debug，6,231,483 字节）、bat 脚本、使用说明，共 13 个文件。
-5. 压缩：`HybridFileXfer-3.0.0-beta5-win-x64.zip`。
-6. 记录校验值：8,210,979 字节，SHA-256 `E1838ABE5EB8881A840B8E69D649D7BA8593DD103350EE849908C4891A59A5C4`。
+3. 打包：`jar --create --file HybridFileXfer.jar --main-class top.weixiansen574.hybridfilexfer.Main -C classes .`（beta6 为 156,299 字节）。
+4. 组装目录：jar、`start.exe`（MinGW 重编译，20,480 字节）、adb 三件套（`adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll`）、Android APK（与 beta5 相同，6,231,483 字节）、bat 脚本、使用说明，共 13 个文件。
+5. 压缩：`HybridFileXfer-3.0.0-beta6-win-x64.zip`。
+6. 记录校验值：8,202,127 字节，SHA-256 `5452E1B264230DEEDBD57F928079A0A3BFDCBF60E9B4ACD712461F4B742E522E`。
 7. 冒烟：解压到干净目录 → `java -jar` 启动 → 观察 8s 进程存活、stderr 为空 → 结束并清理。
 8. 提交：中文提交信息，推送 `origin/feature/gui`，用 `git log --oneline` 复核提交号。
 
@@ -451,12 +479,14 @@ beta5 追加实测（真机 MGFVB20629003959 + Windows 本机）：
 ### 13.2 仍未做 / 已知限制
 
 - `start.exe` 仍只走 CLI 参数，不会拉起 GUI；GUI 需用 `启动图形界面.bat` 或无参 `java -jar`。是否让 `start.exe` 默认启动 GUI 待定（上一轮相关改动被取消，尚未实现）。
-- `HybridFileXferLauncher` 未纳入发行包：本环境无 .NET SDK，无法构建；源码保留。
+- `HybridFileXferLauncher` **不纳入发行**（已定案，源码保留）：Native AOT 在 Windows 必须用 MSVC 链接器，MinGW 不可用；最小依赖为 VS 2022 Build Tools 的 C++ x64 工具 + Windows SDK（约 2–3GB 下载、5–7GB 安装），与 65KB 的启动器不成比例。启动入口固定为 `start.exe` 与 `启动图形界面.bat`。
+- `start.exe` 不再自动下载 JDK：检测不到 Java 且同目录无可用 JDK 时只打印安装指引并退出（Dragonwell 包 200.8MiB、解压 351MiB，放弃自动下载）。
 - 301 授权对**旧 301 客户端**不生效：beta4 及更早的 301 客户端没有授权帧，服务端 2s 超时后按旧流程继续；按电脑授权需要两端同为 beta5 及以上。300 客户端同样只受全局总闸约束。
 - 目录冲突不提供重命名，只支持跳过/覆盖；需要改名请先手动改名后再推/拉。
 - 300 回退模式下主动浏览、新建、删除不可用，推送按钮也禁用；协议层仍可被动收发，需要主动功能必须升级手机端到 301。
+- 大量小文件仍是“每文件一个 RPC 任务”，实测固定成本约 48ms/文件（4000×16KB 需约 225s，同等数据单次批量仅 34s）。疑为 Nagle + 延迟确认，代码中未设置 `setTcpNoDelay`；批量推送或关闭 Nagle 是后续优化方向，本次未实施。
 - 大目录仍一次性返回全量列表，没有分页或增量加载，目录特别大时浏览会卡顿。
 - 手机端删除是递归删除；超大目录可能超过 RPC 超时，界面会显示失败但手机端可能仍在继续执行。
-- 验证环境为 Android 真机（MGFVB20629003959，Android 10）与 Windows 本机；GUI 覆盖冲突弹窗已实现但未做完整人工走查，APK 仍为 beta debug 包。
+- 验证环境：beta5 授权/路径/心跳用 Android 真机 MGFVB20629003959（Android 10，arm64）；beta6 小文件性能测试用模拟器 emulator-5556（Android 14，x86_64），两者都由 Windows 本机通过 adb 转发连接。GUI 覆盖冲突弹窗已实现但未做完整人工走查，APK 仍为 beta debug 包。
 - PC 修改端口后，手机端也要改到同一端口；两端未做自动发现。
 - CI 尚未加入 core 哈希一致性检查，仍靠打包前人工比对。
